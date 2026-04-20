@@ -1,3 +1,4 @@
+pub mod reporter;
 pub mod evaluator;
 pub mod manifest;
 pub mod optimizer;
