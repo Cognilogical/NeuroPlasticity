@@ -16,29 +16,44 @@ pub struct Metadata {
     pub original_score: f64,
 }
 
-pub async fn run_copilot_optimizer(
-    model_name: &str,
+use crate::manifest::MetaLlmConfig;
+
+pub async fn run_llm_optimizer(
+    config: &MetaLlmConfig,
     failing_logs: &str,
     task_prompt: &str,
 ) -> Result<String> {
-    // 1. Get the local GitHub CLI token automatically
-    let output = Command::new("gh")
-        .arg("auth")
-        .arg("token")
-        .output()
-        .context("Failed to execute gh auth token")?;
-    
-    let gh_token = String::from_utf8(output.stdout)?.trim().to_string();
+    let (url, token) = if config.provider == "github" {
+        // 1. Get the local GitHub CLI token automatically
+        let output = Command::new("gh")
+            .arg("auth")
+            .arg("token")
+            .output()
+            .context("Failed to execute gh auth token")?;
+        
+        let gh_token = String::from_utf8(output.stdout)?.trim().to_string();
 
-    if gh_token.is_empty() {
-        anyhow::bail!("GitHub token is empty. Please run `gh auth login`.");
-    }
+        if gh_token.is_empty() {
+            anyhow::bail!("GitHub token is empty. Please run `gh auth login`.");
+        }
+        
+        ("https://models.inference.ai.azure.com/chat/completions".to_string(), gh_token)
+    } else {
+        // 2. Generic OpenAI-compatible endpoint
+        let url = config.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
+        let env_var = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
+        let api_key = std::env::var(env_var).unwrap_or_default();
+        
+        if api_key.is_empty() {
+            anyhow::bail!("API key environment variable {} is empty.", env_var);
+        }
+        
+        (url, api_key)
+    };
 
-    // 2. Build standard OpenAI-compatible payload for the GitHub endpoint
-    let url = "https://models.inference.ai.azure.com/chat/completions";
-
+    // 3. Build standard OpenAI-compatible payload
     let payload = serde_json::json!({
-        "model": model_name,
+        "model": config.model,
         "messages": [
             {
                 "role": "system",
@@ -52,16 +67,16 @@ pub async fn run_copilot_optimizer(
     });
 
     let client = reqwest::Client::new();
-    let res = client.post(url)
-        .bearer_auth(gh_token)
+    let res = client.post(&url)
+        .bearer_auth(token)
         .json(&payload)
         .send()
         .await
-        .context("Failed to send request to GitHub Models API")?;
+        .context("Failed to send request to LLM API")?;
 
     let response_json: serde_json::Value = res.json().await.context("Failed to parse JSON response")?;
 
-    // 3. Extract the mutated rule
+    // 4. Extract the mutated rule
     let new_rule = response_json["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("Fallback rule: avoid previous mistakes")
@@ -71,7 +86,7 @@ pub async fn run_copilot_optimizer(
 }
 
 /// Runs the meta-optimizer and writes a rules overlay if the score is below the pass threshold.
-pub async fn run_optimizer(score: f64, pass_threshold: f64, task_prompt: &str, stderr: &str) -> Result<()> {
+pub async fn run_optimizer(score: f64, pass_threshold: f64, task_prompt: &str, stderr: &str, config: &MetaLlmConfig) -> Result<()> {
     if score >= pass_threshold {
         println!("Score {} >= pass threshold {}. No optimization needed.", score, pass_threshold);
         return Ok(());
@@ -79,8 +94,8 @@ pub async fn run_optimizer(score: f64, pass_threshold: f64, task_prompt: &str, s
 
     println!("Score {} < pass threshold {}. Generating rules overlay...", score, pass_threshold);
 
-    // Call the actual GitHub Copilot Models endpoint
-    let new_rule = run_copilot_optimizer("gpt-4o-mini", stderr, task_prompt).await?;
+    // Call the dynamic provider
+    let new_rule = run_llm_optimizer(config, stderr, task_prompt).await?;
 
     let mocked_rules = vec![
         new_rule,

@@ -26,7 +26,20 @@ pub struct Optimization {
     pub target_rules_file: String,
     pub epochs: u32,
     pub pass_threshold: f64,
-    pub meta_llm: String,
+    pub meta_llm: MetaLlmConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaLlmConfig {
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+fn default_provider() -> String {
+    "github".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
