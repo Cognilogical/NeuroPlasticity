@@ -20,7 +20,7 @@ Agents cannot be safely evaluated on the host machine. NeuroPlasticity uses **Po
 #### B. Pluggable Evaluators (The Reward Function)
 Instead of relying on LLMs to grade other LLMs (which is prone to hallucination), NeuroPlasticity grades the **physical artifacts** the agent leaves behind. Projects define arbitrary scripts (Bash, Python, Node) that return exit codes.
 * `npm run test` (Did the code compile and pass?)
-* `check_db.sh` (Did the agent successfully insert a record into LanceDB?)
+* `check_db.sh` (Did the agent successfully inscribe an Engram into LanceDB?)
 * `verify_synaptic_graph.sh` (Did the agent generate the required visual graph via SynapticGraph?)
 
 #### C. The Meta-Optimizer (LLM-as-an-Optimizer)
@@ -29,7 +29,7 @@ If an agent scores 1.5/3.0, a "Meta-LLM" (e.g., GPT-4o or Claude 3.5) is fed:
 2. The agent's stdout/stderr execution logs.
 3. The specific evaluators that failed.
 
-The Meta-LLM is instructed: *"The agent failed the 'Memory Extraction' test because it forgot to invoke the `neurostrata_add_memory` tool. Rewrite its system prompt to explicitly enforce this behavior before it closes a task."* The framework then overwrites the prompt and loops again.
+The Meta-LLM is instructed: *"The agent failed the 'Engram Inscription' test because it forgot to invoke the `neurostrata_add_memory` tool. Rewrite its system prompt to explicitly enforce this behavior before it closes a task."* The framework then overwrites the prompt and loops again.
 
 ---
 
