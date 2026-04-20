@@ -3,27 +3,27 @@ use std::path::Path;
 use std::process::Command;
 use walkdir::WalkDir;
 use anyhow::Result;
+use tempfile::TempDir;
 
 pub struct RunnerResult {
     pub stdout: String,
     pub stderr: String,
     pub success: bool,
+    pub scratch_dir: TempDir,
+}
+
+pub fn setup_workspace(project_dir: &Path) -> Result<TempDir> {
+    let scratch_dir = tempfile::Builder::new().prefix("neuroplasticity-run-").tempdir()?;
+    let scratch_path = scratch_dir.path();
+    copy_dir_filtered(project_dir, scratch_path)?;
+    Ok(scratch_dir)
 }
 
 pub fn run_agent(
-    project_dir: &Path,
+    scratch_path: &Path,
     base_image: &str,
-    agent_command: &[&str],
-) -> Result<RunnerResult> {
-    // Create a temporary scratch directory
-    let scratch_dir = tempfile::Builder::new().prefix("neuroplasticity-run-").tempdir()?;
-    let scratch_path = scratch_dir.path();
-
-    // Copy the current repository into the scratch dir, ignoring .git and .neuroplasticity
-    copy_dir_filtered(project_dir, scratch_path)?;
-
-    // Construct and execute the Podman command:
-    // podman run --rm --userns=keep-id --security-opt no-new-privileges -v <scratch>:/workspace:Z --workdir /workspace <base_image> <agent_command>
+    agent_command: &[String],
+) -> Result<(String, String, bool)> {
     let mut cmd = Command::new("podman");
     cmd.args(&[
         "run",
@@ -44,11 +44,7 @@ pub fn run_agent(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    Ok(RunnerResult {
-        stdout,
-        stderr,
-        success: output.status.success(),
-    })
+    Ok((stdout, stderr, output.status.success()))
 }
 
 fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
