@@ -71,12 +71,16 @@
           "properties": {
             "provider": {
               "type": "string",
-              "enum": ["github", "custom"],
-              "description": "The LLM API provider. Defaults to 'github' to use Copilot Models API."
+              "enum": ["github", "custom", "embedded"],
+              "description": "The LLM API provider. Defaults to 'github' to use Copilot Models API. Set to 'embedded' to use llama.cpp locally."
             },
             "model": {
               "type": "string",
-              "description": "The model to use (e.g., 'gpt-4o-mini', 'claude-3-5-sonnet')."
+              "description": "The model to use (e.g., 'gpt-4o-mini', 'qwen-local')."
+            },
+            "model_path": {
+              "type": "string",
+              "description": "Optional local path to a .gguf file for the 'embedded' provider. If omitted, defaults to downloading a 4-bit Qwen model."
             },
             "base_url": {
               "type": "string",

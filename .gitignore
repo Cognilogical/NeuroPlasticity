@@ -4,7 +4,9 @@
 *.db
 .beads-credential-key
 
-
 # Added by cargo
-
 /target
+
+# NeuroPlasticity runtime data
+.neuroplasticity/
+neuroplasticity_patch.md
