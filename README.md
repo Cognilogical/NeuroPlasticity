@@ -24,23 +24,67 @@ Building reliable AI agents is currently a dark art of manual prompt-tweaking an
 4.  **The Fix (Epoch 2):** NeuroPlasticity injects the new rule into `.neuroplasticity/rules.json`, boots a fresh container, and runs the agent again.
 5.  **The Patch:** Once the evaluators pass, NeuroPlasticity generates a final `neuroplasticity_patch.md`. You hand this patch to your primary dev-agent (like Claude or Aider) to permanently update your target project.
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Zero-Dependency Sandbox Test)
+
+We've included a self-test configuration in the root directory that demonstrates exactly how the Meta-Optimizer reacts to failure. You can run this immediately after cloning.
 
 Ensure you have [Podman](https://podman.io/) installed.
 
+**1. Clone the repository and build the base container:**
 ```bash
-# 1. Clone the repository
 git clone https://github.com/neuro-org/neuroplasticity.git
 cd neuroplasticity
 
-# 2. Compile the CLI tool (with embedded local inference)
-cargo build --release --features embedded-llm
-
-# 3. Add to your PATH
-export PATH="$PWD/target/release:$PATH"
+# Build the dummy container testbed
+./images/build.sh
 ```
 
-## 🎯 Example: Optimizing the ARC-7 Architectural Review Skill
+**2. Review the dummy test (`plasticity.json`):**
+In this dummy test, we intentionally break an agent by forcing it to output `{"wrong": 1}` instead of what the prompt asks for (`{"greeting": "world"}`).
+```json
+{
+  "name": "neuroplasticity-self-test",
+  "task_prompt": "Write a JSON file named hello.json containing the key 'greeting' with the value 'world'.",
+  "agent_command": ["bash", "-c", "echo '{\"wrong\": 1}' > hello.json"],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "localhost/neuro-agent-testbed:latest"
+  },
+  "evaluators": [
+    {
+      "name": "Check JSON Output",
+      "script": ["bash", "-c", "jq -e '.greeting == \"world\"' hello.json"],
+      "weight": 1.0
+    }
+  ],
+  "optimization": {
+    "target_rules_file": ".neuroplasticity/rules.json",
+    "epochs": 2,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "embedded",
+      "model": "qwen-local"
+    }
+  }
+}
+```
+
+**3. Run the CLI tool (with embedded local inference):**
+No API keys required. The embedded `llama.cpp` engine will automatically download a fast 4-bit `Qwen2.5` model to your local cache.
+```bash
+cargo run --features embedded-llm
+```
+
+**4. Watch the Magic Happen:**
+* **Epoch 1:** The script fails. The evaluator triggers an error.
+* **Meta-Optimization:** Your local GPU spins up, reads the `jq` failure log, and generates a new rule (e.g. *"Rule: Ensure the JSON file hello.json is created with the key 'greeting'"*).
+* **The Overlay:** The orchestrator drops the generated fix into `.neuroplasticity/rules.json`.
+
+*(Note: Because our dummy `agent_command` is just a hardcoded `echo` and doesn't read the `rules.json` file, Epoch 2 will fail again by design! But it perfectly demonstrates the feedback loop!)*
+
+---
+
+## 🎯 Real-World Example: Optimizing the ARC-7 Architectural Review Skill
 
 Let's say you have an elite architectural review agent called **ARC-7** (located at `../ARC-7`). You noticed that ARC-7 sometimes fails to flag when developers use YAML instead of JSON for configs. 
 
