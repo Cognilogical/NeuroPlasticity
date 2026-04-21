@@ -1,5 +1,5 @@
 # NeuroPlasticity 🧠
-**Stop Prompt Engineering by Vibes. Start Prompting by Tests.**
+**Its like a gym for you Agent to improve it's rules.**
 
 Building reliable AI agents is currently a dark art of manual prompt-tweaking and hoping for the best. **NeuroPlasticity** ends the guesswork by introducing **Self-Reinforced Testing (SRT)** to the prompt engineering lifecycle. Built in lightning-fast Rust and fully isolated via rootless Podman sandboxes, NeuroPlasticity treats your agent's system prompt like source code that needs to be compiled. You define the deterministic tests; if your agent fails, our Meta-Optimizer analyzes the `stderr` logs, autonomously writes a behavioral patch for the agent's prompt, and re-runs the container until the tests pass. When it succeeds, it hands you a mathematically verified `neuroplasticity_patch.md` to permanently upgrade your codebase.
 
@@ -33,14 +33,65 @@ Ensure you have [Podman](https://podman.io/) installed.
 git clone https://github.com/neuro-org/neuroplasticity.git
 cd neuroplasticity
 
-# 2. Review the self-test manifest
-cat plasticity.json
+# 2. Compile the CLI tool (with embedded local inference)
+cargo build --release --features embedded-llm
 
-# 3. Run with embedded local inference (No API keys required!)
-cargo run --features embedded-llm
+# 3. Add to your PATH
+export PATH="$PWD/target/release:$PATH"
 ```
 
-If it takes more than 1 epoch to pass, check your project root for `neuroplasticity_patch.md`!
+## 🎯 Example: Optimizing the ARC-7 Architectural Review Skill
+
+Let's say you have an elite architectural review agent called **ARC-7** (located at `../ARC-7`). You noticed that ARC-7 sometimes fails to flag when developers use YAML instead of JSON for configs. 
+
+We can use NeuroPlasticity to run a deterministic test and force ARC-7 to improve.
+
+**1. Create a dummy test file in your project:**
+```bash
+cd ../ARC-7
+echo "database: postgres" > dummy_config.yaml
+```
+
+**2. Write your `plasticity.json` in the `../ARC-7` directory:**
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "name": "arc7-yaml-eval",
+  "task_prompt": "Run an architectural review on dummy_config.yaml",
+  "agent_command": ["./bin/arc7", "review", "dummy_config.yaml"],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "localhost/arc7-testbed:latest"
+  },
+  "optimization": {
+    "target_rules_file": ".neuroplasticity/rules.json",
+    "epochs": 3,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "embedded",
+      "model": "qwen-local"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Flag YAML usage",
+      "script": ["bash", "-c", "grep -qi 'JSON' .arc7_report.md || (echo 'ARC-7 failed to recommend JSON instead of YAML' >&2; exit 1)"],
+      "weight": 1.0
+    }
+  ]
+}
+```
+
+**3. Run the Test!**
+```bash
+neuroplasticity
+```
+
+### What Happens:
+*   **Epoch 1:** NeuroPlasticity copies `ARC-7` into a sandbox. ARC-7 reviews `dummy_config.yaml`, but says nothing about JSON. The `grep` evaluator fails.
+*   **The Meta-Optimizer:** Your local embedded LLM sees `ARC-7 failed to recommend JSON instead of YAML`. It autonomously writes a new system rule: *"When reviewing configuration files, if you see YAML, you MUST explicitly flag it and mandate strict JSON usage instead."* and saves it to `.neuroplasticity/rules.json`.
+*   **Epoch 2:** ARC-7 boots up again, reading the newly generated rules file. This time, it forcefully flags the YAML file. The `grep` evaluator passes!
+*   **The Fix:** NeuroPlasticity outputs `neuroplasticity_patch.md`. You take that mathematically verified rule and permanently paste it into ARC-7's actual prompt/codebase.
 
 ## 🛠️ Configuration (`plasticity.json`)
 
