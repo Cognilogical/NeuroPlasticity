@@ -47,7 +47,7 @@ fn detect_container_engine(preferred: &str) -> Result<(String, bool)> {
         return Ok(("docker".to_string(), false));
     }
 
-    anyhow::bail!("Neither podman nor docker was found on this system.\nTo use NeuroPlasticity, please install a container engine:\n\nUbuntu/Debian: sudo apt install podman\nmacOS: brew install podman\nWindows: https://podman.io/getting-started/installation\n\nOr install Docker: https://docs.docker.com/get-docker/");
+    anyhow::bail!("No container engine (Podman or Docker) found on this system.\nNeuroPlasticity requires Podman to run isolated sandboxes.\n\nPlease install Podman:\nUbuntu/Debian: sudo apt-get install podman\nmacOS: brew install podman\nWindows/Docs: https://podman.io/docs/installation");
 }
 
 pub fn run_agent(
