@@ -62,7 +62,37 @@ fn get_acceptable_models() -> Result<Vec<AcceptableModel>> {
     Ok(default_models)
 }
 
+
+fn find_model_in_caches(filename: &str) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let home_path = PathBuf::from(home);
+    
+    let cache_dirs = vec![
+        home_path.join(".cache/huggingface/hub"),
+        home_path.join(".ollama/models/blobs"),
+        home_path.join(".cache/lm-studio/models"),
+        home_path.join(".cache/neuro/models"),
+    ];
+
+    for dir in cache_dirs {
+        if !dir.exists() { continue; }
+        
+        // Recursively search for the filename, following symlinks (common in huggingface cache)
+        for entry in walkdir::WalkDir::new(&dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == filename {
+                        return Some(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf> {
+
     // 1. If the user explicitly provided a path in plasticity.json, respect it.
     if let Some(path_str) = model_path {
         let path = PathBuf::from(path_str);
@@ -82,11 +112,10 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
 
     let acceptable_models = get_acceptable_models()?;
 
-    // 2. Scan the cache for ANY acceptable model
+    // 2. Scan universal POSIX caches for ANY acceptable model
     for model in &acceptable_models {
-        let path = models_dir.join(&model.filename);
-        if path.exists() {
-            println!("\n✅ Found acceptable local model in cache: {}", model.filename);
+        if let Some(path) = find_model_in_caches(&model.filename) {
+            println!("\n✅ Found acceptable local model in cache: {:?}", path);
             return Ok(path);
         }
     }
