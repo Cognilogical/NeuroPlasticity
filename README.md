@@ -1,7 +1,7 @@
 # NeuroPlasticity 🧠
 **Its like a gym for your agent to self improve it's rules.**
 
-Building reliable AI agents is currently a dark art of manual prompt-tweaking and hoping for the best. **NeuroPlasticity** ends the guesswork by introducing **Self-Reinforced Testing (SRT)** to the prompt engineering lifecycle. Built in lightning-fast Rust and fully isolated via rootless Podman sandboxes, NeuroPlasticity treats your agent's system prompt like source code that needs to be compiled. You define the deterministic tests; if your agent fails, our Meta-Optimizer analyzes the `stderr` logs, autonomously writes a behavioral patch for the agent's prompt, and re-runs the container until the tests pass. When it succeeds, it hands you a mathematically verified `neuroplasticity_patch.md` to permanently upgrade your codebase.
+Building reliable AI agents is currently a dark art of manual prompt-tweaking and hoping for the best. **NeuroPlasticity** ends the guesswork by introducing **Self-Reinforced Testing Framework (SRTF)** to the prompt engineering lifecycle. Built in lightning-fast Rust and fully isolated via rootless Podman sandboxes, NeuroPlasticity treats your agent's system prompt like source code that needs to be compiled. You define the deterministic tests; if your agent fails, our Meta-Optimizer analyzes the `stderr` logs, autonomously writes a behavioral patch for the agent's prompt, and re-runs the container until the tests pass. When it succeeds, it hands you a mathematically verified `neuroplasticity_patch.md` to permanently upgrade your codebase.
 
 > *"By treating verbal feedback from deterministic environments as a reward signal, language agents can iteratively refine their behavior, correcting hallucinations and logical errors without requiring traditional weight updates."*  
 > — Inspired by the architectural findings in **Reflexion: Language Agents with Verbal Reinforcement Learning** (Shinn et al., 2023) and **Large Language Models as Optimizers / OPRO** (Yang et al., Google DeepMind, 2023).
@@ -32,7 +32,7 @@ Ensure you have [Podman](https://podman.io/) installed.
 
 **1. Clone the repository and build the base container:**
 ```bash
-git clone https://github.com/neuro-org/neuroplasticity.git
+git clone https://github.com/Cognilogical/NeuroPlasticity.git
 cd neuroplasticity
 
 # Build the dummy container testbed
@@ -93,7 +93,7 @@ Instead of endlessly tweaking `agent.md` and guessing, you can use NeuroPlastici
 **1. Write your `plasticity.json`:**
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
   "name": "json-formatting-eval",
   "task_prompt": "Read the access logs and output a summary to summary.json.",
   "agent_command": ["my-agent-cli", "--system-prompt", "agent.md"],
@@ -177,7 +177,7 @@ If the agent fixes the markdown bug but suddenly breaks the schema, the overall 
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
   "name": "my-agent-eval",
   "task_prompt": "Update the database schema.",
   "agent_command": ["./run_my_agent.sh"],

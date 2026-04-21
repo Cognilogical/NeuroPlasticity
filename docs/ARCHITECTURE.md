@@ -14,7 +14,7 @@ Every project within the Neuro ecosystem includes a `plasticity.json` file at it
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
   "name": "project-module-eval",
   "task_prompt": "Refactor routing and document the architecture. Follow memory constraints.",
   "agent_command": ["opencode", "run", "--dangerously-skip-permissions"],

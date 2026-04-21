@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "$id": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
   "title": "Plasticity Manifest",
   "description": "Configuration file for the NeuroPlasticity Self-Reinforced Testing (SRT) Framework",
   "type": "object",

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
   "name": "neuroplasticity-self-test",
   "task_prompt": "Write a JSON file named hello.json containing the key 'greeting' with the value 'world'.",
   "agent_command": ["bash", "-c", "echo '{\"wrong\": 1}' > hello.json"],
