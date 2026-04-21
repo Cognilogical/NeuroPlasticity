@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
+  "name": "neuroplasticity-self-test",
+  "task_prompt": "Write a JSON file named hello.json containing the key 'greeting' with the value 'world'.",
+  "agent_command": ["bash", "-c", "echo '{\"wrong\": 1}' > hello.json"],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "localhost/neuro-agent-testbed:latest"
+  },
+  "optimization": {
+    "target_rules_file": ".neuroplasticity/rules.json",
+    "epochs": 2,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "github",
+      "model": "gpt-4o-mini"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Check JSON Output",
+      "script": ["bash", "-c", "jq -e '.greeting == \"world\"' hello.json"],
+      "weight": 1.0
+    }
+  ]
+}
