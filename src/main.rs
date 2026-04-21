@@ -77,6 +77,37 @@ async fn main() -> Result<()> {
         // 6. Check for success
         if eval_result.pass {
             println!("✅ Epoch {} achieved passing score! Run complete.", epoch);
+
+            if epoch > 1 {
+                // If it took > 1 epoch, that means the mutated rules successfully fixed the agent.
+                // We should output an implementation patch.
+                let target_rules_file = Path::new(&manifest.optimization.target_rules_file);
+                if target_rules_file.exists() {
+                    if let Ok(content) = fs::read_to_string(target_rules_file) {
+                        if let Ok(rules) = serde_json::from_str::<Vec<String>>(&content) {
+                            if !rules.is_empty() {
+                                let mut patch_doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
+                                patch_doc.push_str(&format!("**Target Project:** `{}`\n", manifest.name));
+                                patch_doc.push_str("**Status:** ✅ Verified against determinisitic evaluators.\n\n");
+                                patch_doc.push_str("The following behavioral constraints successfully corrected the agent's failure paths. You should permanently inject these into the target agent's system prompt or `AGENTS.md`:\n\n");
+                                
+                                for (i, rule) in rules.iter().enumerate() {
+                                    patch_doc.push_str(&format!("### Rule {}\n> {}\n\n", i + 1, rule));
+                                }
+                                
+                                let patch_path = Path::new("neuroplasticity_patch.md");
+                                if fs::write(patch_path, patch_doc).is_ok() {
+                                    println!("📄 Improvement patch generated at {:?}", patch_path);
+                                    println!("   Provide this patch file to your primary agent to permanently implement the fix.");
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                println!("✅ Passed on first try. No rule mutations were required.");
+            }
+
             break;
         }
 

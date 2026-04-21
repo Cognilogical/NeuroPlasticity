@@ -1,3 +1,4 @@
 [
-  "'Rule: {\"greeting\": \"world\"}'"
+  "'Rule: {\"greeting\": \"world\"}'",
+  "Rule: Ensure the JSON file hello.json is created with the key 'greeting' and the value 'world'."
 ]

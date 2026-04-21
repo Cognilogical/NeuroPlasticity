@@ -12,8 +12,8 @@
     "epochs": 2,
     "pass_threshold": 1.0,
     "meta_llm": {
-      "provider": "github",
-      "model": "gpt-4o-mini"
+      "provider": "embedded",
+      "model": "qwen-local"
     }
   },
   "evaluators": [
