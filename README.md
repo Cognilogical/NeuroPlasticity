@@ -1,5 +1,5 @@
 # NeuroPlasticity 🧠
-**Its like a gym for you Agent to improve it's rules.**
+**Its like a gym for your agent to self improve it's rules.**
 
 Building reliable AI agents is currently a dark art of manual prompt-tweaking and hoping for the best. **NeuroPlasticity** ends the guesswork by introducing **Self-Reinforced Testing (SRT)** to the prompt engineering lifecycle. Built in lightning-fast Rust and fully isolated via rootless Podman sandboxes, NeuroPlasticity treats your agent's system prompt like source code that needs to be compiled. You define the deterministic tests; if your agent fails, our Meta-Optimizer analyzes the `stderr` logs, autonomously writes a behavioral patch for the agent's prompt, and re-runs the container until the tests pass. When it succeeds, it hands you a mathematically verified `neuroplasticity_patch.md` to permanently upgrade your codebase.
 
@@ -12,7 +12,7 @@ Building reliable AI agents is currently a dark art of manual prompt-tweaking an
 
 *   **Automated Self-Healing:** The Meta-Optimizer dynamically patches failing agents by analyzing evaluation logs and injecting targeted behavioral constraints.
 *   **100% Ephemeral Sandboxing:** Agents execute inside secure, rootless **Podman** containers with copy-on-write scratch directories. No host bleed. No broken state.
-*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your laptop's memory.
+*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your computer's memory.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, and deterministic `bash` evaluators in a strict, schema-backed JSON manifest.
 *   **Verified Improvement Patches:** If the framework successfully optimizes an agent, it generates a `neuroplasticity_patch.md` detailing the exact prompt overrides needed to fix the agent permanently.
 
@@ -84,28 +84,22 @@ cargo run --features embedded-llm
 
 ---
 
-## 🎯 Real-World Example: Optimizing the ARC-7 Architectural Review Skill
+## 🎯 Real-World Example: Fixing a Prompts File (`agent.md`)
 
-Let's say you have an elite architectural review agent called **ARC-7** (located at `../ARC-7`). You noticed that ARC-7 sometimes fails to flag when developers use YAML instead of JSON for configs. 
+Let's say you have a data-extraction agent. Its behavior is defined entirely by a markdown prompt file called **`agent.md`**. You've noticed a frustrating bug: when the agent extracts data to a `.json` file, it keeps wrapping the output in markdown code blocks (` ```json ... ``` `), which breaks your automated `jq` parsers.
 
-We can use NeuroPlasticity to run a deterministic test and force ARC-7 to improve.
+Instead of endlessly tweaking `agent.md` and guessing, you can use NeuroPlasticity to mathematically force the agent to figure out the fix itself.
 
-**1. Create a dummy test file in your project:**
-```bash
-cd ../ARC-7
-echo "database: postgres" > dummy_config.yaml
-```
-
-**2. Write your `plasticity.json` in the `../ARC-7` directory:**
+**1. Write your `plasticity.json`:**
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
-  "name": "arc7-yaml-eval",
-  "task_prompt": "Run an architectural review on dummy_config.yaml",
-  "agent_command": ["./bin/arc7", "review", "dummy_config.yaml"],
+  "name": "json-formatting-eval",
+  "task_prompt": "Read the access logs and output a summary to summary.json.",
+  "agent_command": ["my-agent-cli", "--system-prompt", "agent.md"],
   "sandbox": {
     "engine": "podman",
-    "base_image": "localhost/arc7-testbed:latest"
+    "base_image": "localhost/my-agent-testbed:latest"
   },
   "optimization": {
     "target_rules_file": ".neuroplasticity/rules.json",
@@ -118,24 +112,66 @@ echo "database: postgres" > dummy_config.yaml
   },
   "evaluators": [
     {
-      "name": "Flag YAML usage",
-      "script": ["bash", "-c", "grep -qi 'JSON' .arc7_report.md || (echo 'ARC-7 failed to recommend JSON instead of YAML' >&2; exit 1)"],
+      "name": "Strict JSON Check",
+      "script": ["bash", "-c", "jq . summary.json || (echo 'Output is not valid JSON! Did you use markdown blocks?' >&2; exit 1)"],
       "weight": 1.0
     }
   ]
 }
 ```
 
-**3. Run the Test!**
+**2. Run the Test!**
 ```bash
 neuroplasticity
 ```
 
 ### What Happens:
-*   **Epoch 1:** NeuroPlasticity copies `ARC-7` into a sandbox. ARC-7 reviews `dummy_config.yaml`, but says nothing about JSON. The `grep` evaluator fails.
-*   **The Meta-Optimizer:** Your local embedded LLM sees `ARC-7 failed to recommend JSON instead of YAML`. It autonomously writes a new system rule: *"When reviewing configuration files, if you see YAML, you MUST explicitly flag it and mandate strict JSON usage instead."* and saves it to `.neuroplasticity/rules.json`.
-*   **Epoch 2:** ARC-7 boots up again, reading the newly generated rules file. This time, it forcefully flags the YAML file. The `grep` evaluator passes!
-*   **The Fix:** NeuroPlasticity outputs `neuroplasticity_patch.md`. You take that mathematically verified rule and permanently paste it into ARC-7's actual prompt/codebase.
+*   **Epoch 1:** NeuroPlasticity runs your agent in the sandbox using your current `agent.md`. The agent writes the file, but includes the markdown backticks. `jq` fails with a parse error.
+*   **The Meta-Optimizer:** Your local embedded LLM reads the `jq` failure log. It autonomously writes a new system rule: *"CRITICAL: When outputting JSON to a file, DO NOT wrap the output in markdown code blocks (\`\`\`json). You must output raw JSON text only."* It saves this to `.neuroplasticity/rules.json`.
+*   **Epoch 2:** The agent runs again. *Because your agent framework is set up to append `.neuroplasticity/rules.json` to `agent.md` during tests*, the agent now knows exactly what to avoid. It outputs raw JSON. The `jq` evaluator passes!
+*   **The Patch:** NeuroPlasticity outputs `neuroplasticity_patch.md`. You simply copy that mathematically verified rule and paste it permanently into your `agent.md` file.
+
+### 1. Baking in Dependencies (MCP Servers & Tools)
+Because NeuroPlasticity treats your agent as a **black box**, your agent's environment needs to match reality. If your agent relies on external tools like `sqlite`, a Python environment, or an MCP (Model Context Protocol) server, you must provide them in the sandbox.
+
+**The Solution:** Build a custom `Containerfile` or `Dockerfile` that installs your dependencies and starts any necessary background services (like an MCP router). Then point your `plasticity.json` to that image.
+
+```json
+"sandbox": {
+  "engine": "podman",
+  "base_image": "localhost/my-agent-with-mcp-testbed:latest"
+}
+```
+
+*Pro-Tip for MCP:* If your agent fails because it hallucinates data instead of using an MCP tool, ensure your evaluator's error message explicitly names the tool. (e.g., `echo 'Agent hallucinated! It MUST use the postgres-mcp read_query tool.' >&2`). The Meta-Optimizer will read this and explicitly write a rule enforcing the tool's use.
+
+### 2. Chained Evaluators & Preventing Regressions
+As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
+
+The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.
+
+```json
+"evaluators": [
+  {
+    "name": "Check JSON Format",
+    "script": ["bash", "-c", "jq . output.json || (echo 'Must be valid JSON!' >&2; exit 1)"],
+    "weight": 0.5
+  },
+  {
+    "name": "Check For Markdown Code Blocks",
+    "script": ["bash", "-c", "! grep -q '```' output.json || (echo 'No markdown code blocks allowed!' >&2; exit 1)"],
+    "weight": 0.5
+  },
+  {
+    "name": "Check Schema",
+    "script": ["bash", "-c", "jq -e '.status == \"success\"' output.json || (echo 'Missing status field!' >&2; exit 1)"],
+    "weight": 1.0
+  }
+]
+```
+If the agent fixes the markdown bug but suddenly breaks the schema, the overall run fails, and the Meta-Optimizer will attempt a new prompt that addresses both constraints until it finds the perfect balance.
+
+> **🤯 META PRO-TIP:** Don't want to write these JSON tests and bash evaluators manually? Just point your primary dev-agent (like Claude, Aider, or this CLI) at this `README.md` and tell it: *"Read this framework's documentation, then write a `plasticity.json` test suite to evaluate and improve your own performance on [Task X]."* Let the agent build its own gym!
 
 ## 🛠️ Configuration (`plasticity.json`)
 
