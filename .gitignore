@@ -10,3 +10,13 @@
 # NeuroPlasticity runtime data
 .neuroplasticity/
 neuroplasticity_patch.md
+
+# Caches and editor configurations
+.fastembed_cache/
+downloads/
+.vscode/
+.idea/
+*.swp
+*.log
+.DS_Store
+.claude/
