@@ -23,6 +23,16 @@ pub async fn run_llm_optimizer(
     failing_logs: &str,
     task_prompt: &str,
 ) -> Result<String> {
+    if config.provider == "embedded" {
+        #[cfg(feature = "embedded-llm")]
+        {
+            return crate::embedded_llm::run_embedded_llm(task_prompt, failing_logs, config.model_path.as_ref()).await;
+        }
+        #[cfg(not(feature = "embedded-llm"))]
+        {
+            anyhow::bail!("The 'embedded' provider requires the 'embedded-llm' feature to be enabled during build.");
+        }
+    }
     let (url, token) = if config.provider == "github" {
         // 1. Get the local GitHub CLI token automatically
         let output = Command::new("gh")

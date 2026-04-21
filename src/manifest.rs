@@ -36,6 +36,7 @@ pub struct MetaLlmConfig {
     pub model: String,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    pub model_path: Option<String>,
 }
 
 fn default_provider() -> String {

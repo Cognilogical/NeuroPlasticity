@@ -8,6 +8,8 @@ pub mod evaluator;
 pub mod manifest;
 pub mod optimizer;
 pub mod runner;
+#[cfg(feature = "embedded-llm")]
+pub mod embedded_llm;
 
 #[tokio::main]
 async fn main() -> Result<()> {
