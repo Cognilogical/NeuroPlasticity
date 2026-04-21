@@ -48,9 +48,10 @@ async fn main() -> Result<()> {
         println!("Executing agent in sandbox ({})...", base_image);
         let (stdout, stderr, _success) = runner::run_agent(
             scratch_path,
+            &manifest.sandbox.engine,
             base_image,
             agent_command,
-        ).context("Failed to run agent in Podman")?;
+        ).context("Failed to run agent in container sandbox")?;
 
         // 4. Evaluate & Score
         println!("Evaluating side effects...");
