@@ -3,6 +3,7 @@ use std::path::{PathBuf};
 use std::fs;
 use std::num::NonZero;
 use tokio::io::AsyncWriteExt;
+use serde::{Deserialize, Serialize};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -10,37 +11,95 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::AddBos;
 
-// Default to a small, fast model suitable for local error log analysis.
-const DEFAULT_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf";
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AcceptableModel {
+    pub filename: String,
+    pub download_url: String,
+}
+
+fn get_acceptable_models() -> Result<Vec<AcceptableModel>> {
+    let config_dir = match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home).join(".config/NeuroPlasticity"),
+        Err(_) => PathBuf::from(".neuroplasticity"),
+    };
+
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
+    }
+
+    let config_path = config_dir.join("models.json");
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path).context("Failed to read models.json")?;
+        if let Ok(models) = serde_json::from_str::<Vec<AcceptableModel>>(&content) {
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
+    }
+
+    // Default list if file doesn't exist or is empty
+    let default_models = vec![
+        AcceptableModel {
+            filename: "qwen2.5-coder-7b-instruct-q4_k_m.gguf".to_string(),
+            download_url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf".to_string(),
+        },
+        AcceptableModel {
+            filename: "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/QuantFactory/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf".to_string(),
+        },
+        AcceptableModel {
+            filename: "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/bartowski/Mistral-Nemo-Instruct-2407-GGUF/resolve/main/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf".to_string(),
+        }
+    ];
+
+    // Write default to file so user can edit it
+    if let Ok(json_content) = serde_json::to_string_pretty(&default_models) {
+        let _ = fs::write(&config_path, json_content);
+    }
+
+    Ok(default_models)
+}
 
 async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf> {
-    let models_dir = match std::env::var("HOME") {
-        Ok(home) => PathBuf::from(home).join(".cache/neuro/models"),
-        Err(_) => PathBuf::from(".neuroplasticity/models"),
-    };
-    
-    // Determine target path
-    let target_path = if let Some(path_str) = model_path {
+    // 1. If the user explicitly provided a path in plasticity.json, respect it.
+    if let Some(path_str) = model_path {
         let path = PathBuf::from(path_str);
         if path.exists() {
             return Ok(path);
         }
-        path
-    } else {
-        if !models_dir.exists() {
-            fs::create_dir_all(&models_dir).context("Failed to create model cache directory")?;
-        }
-        models_dir.join("qwen2.5-coder-7b-instruct-q4_k_m.gguf")
-    };
-
-    if target_path.exists() {
-        return Ok(target_path);
     }
 
-    println!("Local model not found at {:?}. Downloading default 4-bit model...", target_path);
+    let models_dir = match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home).join(".cache/neuro/models"),
+        Err(_) => PathBuf::from(".neuroplasticity/models"),
+    };
+
+    if !models_dir.exists() {
+        fs::create_dir_all(&models_dir).context("Failed to create model cache directory")?;
+    }
+
+    let acceptable_models = get_acceptable_models()?;
+
+    // 2. Scan the cache for ANY acceptable model
+    for model in &acceptable_models {
+        let path = models_dir.join(&model.filename);
+        if path.exists() {
+            println!("\n✅ Found acceptable local model in cache: {}", model.filename);
+            return Ok(path);
+        }
+    }
+
+    // 3. Fallback: If cache is empty of acceptable models, download the primary default
+    let default_model = &acceptable_models[0];
+    let target_path = models_dir.join(&default_model.filename);
+
+    println!("No suitable models found in cache.");
+    println!("Downloading {}...", default_model.filename);
     println!("This will take a few minutes but only happens once.");
 
-    let response = reqwest::get(DEFAULT_MODEL_URL).await.context("Failed to download model")?;
+    let response = reqwest::get(&default_model.download_url).await.context("Failed to download model")?;
     
     if !response.status().is_success() {
         anyhow::bail!("Failed to download model: HTTP {}", response.status());
