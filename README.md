@@ -173,7 +173,7 @@ The Meta-Optimizer must find a system prompt that satisfies *all* evaluators sim
 ```
 If the agent fixes the markdown bug but suddenly breaks the schema, the overall run fails, and the Meta-Optimizer will attempt a new prompt that addresses both constraints until it finds the perfect balance.
 
-> **🤯 META PRO-TIP:** Don't want to write these JSON tests and bash evaluators manually? Just point your primary dev-agent (like Claude, Aider, or this CLI) at this `README.md` and tell it: *"Read this framework's documentation, then write a `plasticity.json` test suite to evaluate and improve your own performance on [Task X]."* Let the agent build its own gym!
+> **🤯 META PRO-TIP:** Don't want to write these JSON tests and bash evaluators manually? Just point your primary dev-agent (like OpenCode, Claude, Aider, or this CLI) at this `README.md` and tell it: *"Read this framework's documentation, then write a `plasticity.json` test suite to evaluate and improve your own performance on [Task X]."* Let the agent build its own gym!
 
 ## 🛠️ Configuration (`plasticity.json`)
 
