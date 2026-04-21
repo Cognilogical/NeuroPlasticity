@@ -1,124 +1,99 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/neuro-org/neuroplasticity/main/schemas/v1/plasticity.schema.json",
-  "title": "Plasticity Manifest",
-  "description": "Configuration file for the NeuroPlasticity Self-Reinforced Testing (SRT) Framework",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
+  "title": "NeuroPlasticity Prompt Testing Suite",
+  "description": "Schema for defining prompt testing suites, variables, and assertions in the NeuroPlasticity framework.",
   "type": "object",
+  "required": ["version", "suite", "tests"],
   "properties": {
-    "$schema": {
+    "version": {
       "type": "string",
-      "description": "URL of the JSON schema."
+      "enum": ["1.0"],
+      "description": "The schema version."
     },
-    "name": {
+    "suite": {
       "type": "string",
-      "description": "The name of the project or module being evaluated."
+      "description": "The name of the prompt testing suite."
     },
-    "task_prompt": {
+    "description": {
       "type": "string",
-      "description": "The prompt or goal passed to the agent for execution."
+      "description": "Optional description of what this suite tests."
     },
-    "agent_command": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "minItems": 1,
-      "description": "The exact command and arguments used to run the agent headlessly inside the sandbox."
-    },
-    "sandbox": {
+    "defaults": {
       "type": "object",
+      "description": "Default configuration for all tests in this suite.",
       "properties": {
-        "engine": {
+        "model": {
           "type": "string",
-          "enum": ["podman"],
-          "description": "The container engine. Currently only 'podman' is supported for rootless security."
+          "description": "The default AI model to use (e.g., 'gpt-4o', 'claude-3-5-sonnet')."
         },
-        "base_image": {
-          "type": "string",
-          "description": "The Docker/Podman base image to use. Should include a pinned digest (e.g., @sha256:...)."
-        },
-        "setup_script": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Optional command/script to run before the agent to set up the environment."
-        }
-      },
-      "required": ["engine", "base_image"]
-    },
-    "optimization": {
-      "type": "object",
-      "properties": {
-        "target_rules_file": {
-          "type": "string",
-          "description": "The JSON file where the meta-optimizer will write generated rules overlays."
-        },
-        "epochs": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 50,
-          "description": "The maximum number of optimization loops to run before failing."
-        },
-        "pass_threshold": {
+        "temperature": {
           "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0,
-          "description": "The weighted score ratio required to stop the loop successfully."
-        },
-        "meta_llm": {
-          "type": "object",
-          "properties": {
-            "provider": {
-              "type": "string",
-              "enum": ["github", "custom", "embedded"],
-              "description": "The LLM API provider. Defaults to 'github' to use Copilot Models API. Set to 'embedded' to use llama.cpp locally."
-            },
-            "model": {
-              "type": "string",
-              "description": "The model to use (e.g., 'gpt-4o-mini', 'qwen-local')."
-            },
-            "model_path": {
-              "type": "string",
-              "description": "Optional local path to a .gguf file for the 'embedded' provider. If omitted, defaults to downloading a 4-bit Qwen model."
-            },
-            "base_url": {
-              "type": "string",
-              "description": "Custom base URL for the OpenAI-compatible completions endpoint."
-            },
-            "api_key_env": {
-              "type": "string",
-              "description": "Environment variable containing the API key (e.g., 'OPENAI_API_KEY')."
-            }
-          },
-          "required": ["model"]
+          "minimum": 0,
+          "maximum": 2,
+          "description": "The default temperature setting."
         }
-      },
-      "required": ["target_rules_file", "epochs", "pass_threshold", "meta_llm"]
+      }
     },
-    "evaluators": {
+    "tests": {
       "type": "array",
+      "description": "List of individual prompt test cases.",
       "items": {
         "type": "object",
+        "required": ["name", "prompt", "assertions"],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "The name of the test case."
           },
-          "script": {
-            "type": "array",
-            "items": {
+          "system_prompt": {
+            "type": "string",
+            "description": "The system prompt to prepend."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The user prompt to execute."
+          },
+          "variables": {
+            "type": "object",
+            "description": "Variables to interpolate into the prompt.",
+            "additionalProperties": {
               "type": "string"
-            },
-            "minItems": 1
+            }
           },
-          "weight": {
-            "type": "number",
-            "minimum": 0.0
+          "assertions": {
+            "type": "array",
+            "description": "List of assertions to validate the model's response.",
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "contains",
+                    "not_contains",
+                    "matches_regex",
+                    "is_json",
+                    "is_valid_schema",
+                    "exact_match",
+                    "llm_eval"
+                  ],
+                  "description": "The type of assertion to perform."
+                },
+                "value": {
+                  "type": ["string", "object", "array", "boolean", "number"],
+                  "description": "The value or schema to test against."
+                },
+                "eval_prompt": {
+                  "type": "string",
+                  "description": "If type is 'llm_eval', the prompt used by the evaluator model to grade the response."
+                }
+              }
+            }
           }
-        },
-        "required": ["name", "script", "weight"]
+        }
       }
     }
-  },
-  "required": ["name", "task_prompt", "agent_command", "sandbox", "optimization", "evaluators"]
+  }
 }
