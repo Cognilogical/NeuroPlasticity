@@ -14,7 +14,10 @@ use llama_cpp_2::model::AddBos;
 const DEFAULT_MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf";
 
 async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf> {
-    let models_dir = PathBuf::from(".neuroplasticity/models");
+    let models_dir = match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home).join(".cache/neuro/models"),
+        Err(_) => PathBuf::from(".neuroplasticity/models"),
+    };
     
     // Determine target path
     let target_path = if let Some(path_str) = model_path {
@@ -25,7 +28,7 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
         path
     } else {
         if !models_dir.exists() {
-            fs::create_dir_all(&models_dir).context("Failed to create .neuroplasticity/models directory")?;
+            fs::create_dir_all(&models_dir).context("Failed to create model cache directory")?;
         }
         models_dir.join("qwen2.5-coder-7b-instruct-q4_k_m.gguf")
     };
