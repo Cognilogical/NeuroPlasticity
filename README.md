@@ -18,9 +18,10 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 ## 🔥 Features
 
 *   **Automated Self-Healing:** The Meta-Optimizer dynamically patches failing agents by analyzing evaluation logs and injecting targeted behavioral constraints.
-*   **Hybrid Workspace (Zero-Copy):** Agents execute inside secure, rootless **Podman/Docker** containers. The host project is mounted as Read-Only (`/project:ro`) to guarantee safety, while the agent works in an ephemeral Read-Write scratch directory (`/workspace:rw`). 
-*   **Zero-Dockerfile JIT Setup:** No need to build custom, bloated container images. NeuroPlasticity can use standard base images (like `node:20-slim` or `python:3.12-slim`) and installs your agent Just-In-Time using a `setup_script` array in your manifest.
-*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to using universally accepted POSIX model caches: `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`, with a fallback to `~/.cache/neuro/models/`.
+*   **Hybrid Workspace (Zero-Copy):** Agents execute inside secure, rootless **Podman** containers. The host project is mounted as Read-Only (`/project:ro`) to guarantee safety, while the agent works in an ephemeral Read-Write scratch directory (`/workspace:rw`), eliminating slow deep-copies.
+*   **Zero-Dockerfile JIT Setup:** No need to build custom, bloated container images. NeuroPlasticity uses standard base images (like `node:20-slim` or `python:3.12-slim`) and installs your agent Just-In-Time using a `setup_script` array in your manifest.
+*   **Zero-Config Auth:** Mount host credential directories (e.g., `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`) as read-only to bypass complex OAuth flows in ephemeral sandboxes.
+*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and deterministic `bash` evaluators in a strict, schema-backed JSON manifest.
 
 ## ⚡ How It Works

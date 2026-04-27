@@ -13,8 +13,8 @@ Follow these exact architectural rules.
 
 ## 🏗️ 1. The Sandbox Architecture (Hybrid Workspace)
 When NeuroPlasticity runs your test, it spins up a container. To ensure safety and speed, it uses a **Split Workspace**:
-*   **`/project` (Read-Only):** The user's entire repository is mounted here. You can read the code, but you CANNOT modify the host project directly.
-*   **`/workspace` (Read-Write):** A temporary, ephemeral scratch directory. **You must write your outputs, refactors, or generated files here.**
+*   **`/project` (Read-Only):** The user's entire repository is mounted here. You can read the code, but you CANNOT modify the host project directly. This guarantees host safety.
+*   **`/workspace` (Read-Write):** A temporary, ephemeral scratch directory. **You must write your outputs, refactors, or generated files here.** This approach eliminates slow deep-copies.
 
 ## 📜 2. Writing the `plasticity.json`
 This file defines the sandbox. You must define the task, map the user's authentication configs (so you don't need API keys), write your `setup_script` to install yourself, and write a strict bash evaluator.
@@ -67,7 +67,7 @@ This file defines the sandbox. You must define the task, map the user's authenti
 
 ### 🧠 Critical Directives for Agents:
 1. **The `setup_script` array:** Use this to run `npm install -g`, `pip install`, or `curl` commands to install your CLI into the base image.
-2. **The `mounts` array:** If you require authentication (like `~/.claude.json` or `~/.config/gh`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
+2. **The `mounts` array (Zero-Config Auth):** If you require authentication (like `~/.claude.json`, `~/.config/opencode`, or `~/.local/share/opencode`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
 3. **The `evaluators` script:** You must write a bash script that returns `exit 0` on success and `exit 1` on failure. If the test fails, **you must `echo` a highly descriptive error message to `>&2` (stderr)**. The Meta-Optimizer reads this `stderr` message to learn what you did wrong.
 4. **The Feedback Loop:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2!
 
