@@ -22,6 +22,11 @@
         "readonly": true
       },
       {
+        "source": "~/.local/share/opencode",
+        "target": "/root/.local/share/opencode",
+        "readonly": true
+      },
+      {
         "source": "~/.opencode/bin/opencode",
         "target": "/usr/local/bin/opencode",
         "readonly": true
