@@ -20,3 +20,4 @@ downloads/
 *.log
 .DS_Store
 .claude/
+.beads/
