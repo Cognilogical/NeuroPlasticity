@@ -127,30 +127,34 @@ If the agent is a pre-compiled native binary located in the host's home director
 }
 ```
 
-## 🛡️ 3. Adversarial Stress Testing (Optional but Highly Recommended)
-Not all LLMs follow rules equally. Reasoning models (like `o3-mini` or `codex-max`) stubbornly ignore formatting rules, while fast models (like `gpt-5-mini` or `claude-haiku`) frequently forget negative constraints. 
+## 🛡️ 3. Adversarial Stress Testing (The Waterfall)
+Not all LLMs follow rules equally. Reasoning models (like `o3-mini`) stubbornly ignore formatting rules, while fast models (like `gpt-5-mini` or `claude-haiku`) frequently forget negative constraints. 
 
-If you want to prove your prompt is indestructible, you can dynamically query the user's available models and automatically test yourself against the worst offender.
+If you want to mathematically prove your prompt is indestructible, **do not hardcode a single model or write monolithic bash scripts.** Instead, build an **Adversarial Waterfall**.
 
-**For Opencode:**
-Instead of hardcoding a model, use this dynamic bash script in your `agent_command` to find the user's most difficult configured model:
+**AGENT INSTRUCTIONS: HOW TO BUILD THE WATERFALL**
+When the user asks you to set up tests, you must discover what models are available on their specific machine, categorize them, and generate a sequence of JSON test files.
 
-```json
-  "agent_command": [
-    "bash", "-c", 
-    "MODELS=$(/usr/local/bin/opencode models 2>/dev/null || echo ''); WORST=$(echo \"$MODELS\" | grep -iE 'o1|o3|r1|deepseek|codex-max' | head -n 1); if [ -z \"$WORST\" ]; then WORST=$(echo \"$MODELS\" | grep -iE 'mini|haiku|flash|nano' | head -n 1); fi; CMD=\"/usr/local/bin/opencode run\"; if [ -n \"$WORST\" ]; then CMD=\"$CMD -m $WORST\"; fi; cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && $CMD --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
-  ]
-```
+**Step 1: Discovery**
+Use your own CLI tool (e.g., `opencode models`, `gh copilot models`, or `claude config`) via your host terminal to pull the user's available model list.
 
-**For Claude Code:**
-Claude Code is tightly coupled to Anthropic and does not support hundreds of OpenRouter models. The list of models is universally static. To stress-test Claude Code, explicitly hardcode the "fast and forgetful" model (`claude-3-5-haiku-20241022`):
+**Step 2: Categorization**
+Search the list you just pulled and identify the worst offenders in these three Archetypes:
+1. **The Reasoning Rebel:** Look for models containing `o1`, `o3`, `r1`, `deepseek`, `codex`, or `thinking`. (These ignore formatting).
+2. **The Fast & Forgetful:** Look for models containing `mini`, `haiku`, `flash`, `nano`, or `fast`. (These drop rules).
+3. **The Wildcard:** Look for models containing `grok`, `experimental`, or random names like `pickle`. (These add chatty conversational filler).
 
-```json
-  "agent_command": [
-    "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && claude -m claude-3-5-haiku-20241022 -p \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
-  ]
-```
+**Step 3: Generate the Test Suite**
+Create a directory (e.g., `.neuroplasticity/tests/`) and generate a separate `plasticity.json` for each archetype you found. The only difference between these files should be the model flag (e.g., `-m`) in the `agent_command`.
+- `test-01-reasoning.json`
+- `test-02-forgetful.json`
+- `test-03-wildcard.json`
+
+**Step 4: The Regression Loop (Tell the User)**
+Instruct the user to run them sequentially (Test 1, then Test 2, then Test 3). 
+Because NeuroPlasticity accumulates its lessons in `.neuroplasticity/rules.json`, the prompt will get stronger with each test. **CRITICAL:** If Test 3 fails and requires the Meta-Optimizer to generate a new rule, tell the user they *must* restart the waterfall from Test 1 to ensure the new rule didn't cause a regression in the Reasoning model.
+
+When all tests in the waterfall pass on Epoch 1, the accumulated `neuroplasticity_patch.md` is universally bulletproof.
 
 ### 🧠 Critical Directives for Agents:
 1. **Choose Your Installation Strategy:** If you are an NPM package, use **Strategy A**. If you are a native pre-compiled binary, use **Strategy B**. NEVER mix the two (do not mount a host binary into a `node:20-slim` container, and do not try to run `npm install -g opencode`).
