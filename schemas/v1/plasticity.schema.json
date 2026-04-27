@@ -30,7 +30,10 @@
       "properties": {
         "engine": {
           "type": "string",
-          "enum": ["podman", "docker"],
+          "enum": [
+            "podman",
+            "docker"
+          ],
           "description": "The container engine to use. Podman is preferred for rootless security."
         },
         "base_image": {
@@ -75,11 +78,17 @@
                 "description": "Whether the mount should be read-only. Defaults to true."
               }
             },
-            "required": ["source", "target"]
+            "required": [
+              "source",
+              "target"
+            ]
           }
         }
       },
-      "required": ["engine", "base_image"]
+      "required": [
+        "engine",
+        "base_image"
+      ]
     },
     "optimization": {
       "type": "object",
@@ -96,8 +105,8 @@
         },
         "pass_threshold": {
           "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0,
+          "minimum": 0,
+          "maximum": 1,
           "description": "The weighted score ratio required to stop the loop successfully."
         },
         "meta_llm": {
@@ -105,7 +114,11 @@
           "properties": {
             "provider": {
               "type": "string",
-              "enum": ["github", "custom", "embedded"],
+              "enum": [
+                "github",
+                "custom",
+                "embedded"
+              ],
               "description": "The LLM API provider. Defaults to 'github' to use Copilot Models API. Set to 'embedded' to use llama.cpp locally."
             },
             "model": {
@@ -125,10 +138,17 @@
               "description": "Environment variable containing the API key (e.g., 'OPENAI_API_KEY')."
             }
           },
-          "required": ["model"]
+          "required": [
+            "model"
+          ]
         }
       },
-      "required": ["target_rules_file", "epochs", "pass_threshold", "meta_llm"]
+      "required": [
+        "target_rules_file",
+        "epochs",
+        "pass_threshold",
+        "meta_llm"
+      ]
     },
     "evaluators": {
       "type": "array",
@@ -138,21 +158,60 @@
           "name": {
             "type": "string"
           },
+          "type": {
+            "type": "string",
+            "enum": [
+              "host_bash",
+              "container",
+              "llm"
+            ],
+            "default": "host_bash"
+          },
           "script": {
             "type": "array",
             "items": {
               "type": "string"
-            },
-            "minItems": 1
+            }
+          },
+          "image": {
+            "type": "string"
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "setup_script": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "target_file": {
+            "type": "string"
           },
           "weight": {
             "type": "number",
-            "minimum": 0.0
+            "minimum": 0
           }
         },
-        "required": ["name", "script", "weight"]
+        "required": [
+          "name",
+          "weight"
+        ]
       }
     }
   },
-  "required": ["name", "task_prompt", "agent_command", "sandbox", "optimization", "evaluators"]
+  "required": [
+    "name",
+    "task_prompt",
+    "agent_command",
+    "sandbox",
+    "optimization",
+    "evaluators"
+  ]
 }
