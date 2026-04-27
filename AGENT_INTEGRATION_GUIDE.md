@@ -41,7 +41,7 @@ This file defines the sandbox. You must define the task, map the user's authenti
     "mounts": [
       {
         "source": "~/.config/my-agent-cli",
-        "target": "/root/.config/my-agent-cli",
+        "target": "/user_home/.config/my-agent-cli",
         "readonly": true
       }
     ]
@@ -68,7 +68,7 @@ This file defines the sandbox. You must define the task, map the user's authenti
 
 ### 🧠 Critical Directives for Agents:
 1. **The `setup_script` array:** Use this to run `npm install -g`, `pip install`, or `curl` commands to install your CLI into the base image.
-2. **The `mounts` array (Zero-Config Auth):** If you require authentication (like `~/.claude.json`, `~/.config/opencode`, or `~/.local/share/opencode`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
+2. **The `mounts` array (Zero-Config Auth):** If you require authentication (like `~/.claude.json`, `~/.config/opencode`, or `~/.local/share/opencode`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/user_home/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
 3. **The `evaluators` array:** You must define your tests. NeuroPlasticity supports three `type`s of evaluators:
    - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure.
    - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.

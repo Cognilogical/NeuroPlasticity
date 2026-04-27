@@ -18,12 +18,12 @@
     "mounts": [
       {
         "source": "~/.config/opencode",
-        "target": "/root/.config/opencode",
+        "target": "/user_home/.config/opencode",
         "readonly": true
       },
       {
         "source": "~/.local/share/opencode",
-        "target": "/root/.local/share/opencode",
+        "target": "/user_home/.local/share/opencode",
         "readonly": true
       },
       {

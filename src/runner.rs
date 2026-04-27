@@ -91,6 +91,20 @@ pub fn run_agent(
     cmd.arg("-v");
     cmd.arg(&format!("{}:{}:rw,Z", scratch_path.display(), scratch_mount));
 
+    // Ephemeral User Home to fix UID/Permission issues for npm/pip
+    let ephemeral_home = tempfile::Builder::new().prefix("neuro-home-").tempdir()?;
+    cmd.arg("-v");
+    cmd.arg(&format!("{}:/user_home:rw,Z", ephemeral_home.path().display()));
+    
+    cmd.arg("-e");
+    cmd.arg("HOME=/user_home");
+    
+    cmd.arg("-e");
+    cmd.arg("NPM_CONFIG_PREFIX=/user_home/.npm-global");
+    
+    cmd.arg("-e");
+    cmd.arg("PATH=/user_home/.local/bin:/user_home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+
     // Custom Mounts
     if let Some(mounts) = &sandbox.mounts {
         for mount in mounts {
@@ -100,6 +114,24 @@ pub fn run_agent(
                 println!("⚠️  Mount source {} does not exist, skipping.", mount.source);
                 continue;
             }
+            
+            // Pre-create target parent directories in the ephemeral home if mounting into /user_home/
+            // This prevents Podman from auto-creating parent directories (like .local) as root.
+            if mount.target.starts_with("/user_home/") {
+                if let Ok(rel_path) = Path::new(&mount.target).strip_prefix("/user_home/") {
+                    let host_target_dir = ephemeral_home.path().join(rel_path);
+                    
+                    // If the source is a directory, pre-create the target directory itself
+                    // so Podman doesn't create the target directory as root either.
+                    if source_path.is_dir() {
+                        let _ = std::fs::create_dir_all(&host_target_dir);
+                    } else if let Some(parent) = host_target_dir.parent() {
+                        // If it's a file, just pre-create its parent directory.
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+            }
+
             let ro_flag = if mount.readonly { "ro," } else { "" };
             cmd.arg("-v");
             cmd.arg(&format!("{}:{}:{}Z", source_path.display(), mount.target, ro_flag));

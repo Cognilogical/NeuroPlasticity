@@ -62,7 +62,7 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
     "mounts": [
       {
         "source": "~/.claude.json",
-        "target": "/root/.claude.json",
+        "target": "/user_home/.claude.json",
         "readonly": true
       }
     ]
