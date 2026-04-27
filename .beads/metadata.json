@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "NeuroPlasticity",
-  "project_id": "b448018e-8c4c-4ff1-b283-5d97c5a35fa6"
-}
