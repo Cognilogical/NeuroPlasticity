@@ -127,6 +127,31 @@ If the agent is a pre-compiled native binary located in the host's home director
 }
 ```
 
+## 🛡️ 3. Adversarial Stress Testing (Optional but Highly Recommended)
+Not all LLMs follow rules equally. Reasoning models (like `o3-mini` or `codex-max`) stubbornly ignore formatting rules, while fast models (like `gpt-5-mini` or `claude-haiku`) frequently forget negative constraints. 
+
+If you want to prove your prompt is indestructible, you can dynamically query the user's available models and automatically test yourself against the worst offender.
+
+**For Opencode:**
+Instead of hardcoding a model, use this dynamic bash script in your `agent_command` to find the user's most difficult configured model:
+
+```json
+  "agent_command": [
+    "bash", "-c", 
+    "MODELS=$(/usr/local/bin/opencode models 2>/dev/null || echo ''); WORST=$(echo \"$MODELS\" | grep -iE 'o1|o3|r1|deepseek|codex-max' | head -n 1); if [ -z \"$WORST\" ]; then WORST=$(echo \"$MODELS\" | grep -iE 'mini|haiku|flash|nano' | head -n 1); fi; CMD=\"/usr/local/bin/opencode run\"; if [ -n \"$WORST\" ]; then CMD=\"$CMD -m $WORST\"; fi; cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && $CMD --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+  ]
+```
+
+**For Claude Code:**
+Claude Code is tightly coupled to Anthropic and does not support hundreds of OpenRouter models. The list of models is universally static. To stress-test Claude Code, explicitly hardcode the "fast and forgetful" model (`claude-3-5-haiku-20241022`):
+
+```json
+  "agent_command": [
+    "bash", "-c", 
+    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && claude -m claude-3-5-haiku-20241022 -p \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+  ]
+```
+
 ### 🧠 Critical Directives for Agents:
 1. **Choose Your Installation Strategy:** If you are an NPM package, use **Strategy A**. If you are a native pre-compiled binary, use **Strategy B**. NEVER mix the two (do not mount a host binary into a `node:20-slim` container, and do not try to run `npm install -g opencode`).
 2. **The `mounts` array (Zero-Config Auth):** Map the user's host config directory into the container's `/user_home/` directory. **CRITICAL WARNING FOR SQLITE:** If your agent relies on a local SQLite database for state (like `~/.local/share/opencode`), you MUST mount it with `"readonly": false`. If you mount an SQLite database as read-only, the agent will crash trying to acquire a WAL (Write-Ahead Log) lock.
