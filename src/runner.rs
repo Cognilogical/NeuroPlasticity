@@ -105,6 +105,18 @@ pub fn run_agent(
     cmd.arg("-e");
     cmd.arg("PATH=/user_home/.local/bin:/user_home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
+    // Force non-interactive environments for CLI agents inside the sandbox
+    cmd.arg("-e");
+    cmd.arg("CI=1");
+    cmd.arg("-e");
+    cmd.arg("CI=true");
+    cmd.arg("-e");
+    cmd.arg("CONTINUOUS_INTEGRATION=1");
+    cmd.arg("-e");
+    cmd.arg("NONINTERACTIVE=1");
+    cmd.arg("-e");
+    cmd.arg("DEBIAN_FRONTEND=noninteractive");
+
     // Custom Mounts
     if let Some(mounts) = &sandbox.mounts {
         for mount in mounts {
