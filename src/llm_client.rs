@@ -37,6 +37,12 @@ pub async fn ask_llm(
         // 2. Generic OpenAI-compatible endpoint
         let url = config.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
         let env_var = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
+        
+        // P0 Security Fix: Prevent exfiltration of arbitrary host env vars (like AWS_SECRET_ACCESS_KEY or SSH_PRIVATE_KEY) via malicious plasticity.json
+        if !env_var.ends_with("_API_KEY") && !env_var.ends_with("_TOKEN") && env_var != "API_KEY" {
+            anyhow::bail!("Security Exception: To prevent credential exfiltration, `api_key_env` must end in '_API_KEY' or '_TOKEN'. Attempted to use: {}", env_var);
+        }
+        
         let api_key = std::env::var(env_var).unwrap_or_default();
         
         if api_key.is_empty() {

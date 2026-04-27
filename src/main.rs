@@ -30,6 +30,11 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
 
     let target_rules_file = PathBuf::from(&manifest.optimization.target_rules_file);
 
+    // Prevent Path Traversal (P0 Fix)
+    if target_rules_file.is_absolute() || target_rules_file.components().any(|c| c.as_os_str() == "..") {
+        anyhow::bail!("Security Exception: target_rules_file must be a safe, relative path inside the project directory.");
+    }
+
     for epoch in 1..=max_epochs {
         println!("\n--- Epoch {} / {} ---", epoch, max_epochs);
 
