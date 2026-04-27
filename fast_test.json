@@ -1,0 +1,27 @@
+{
+  "name": "Fast Performance Test",
+  "task_prompt": "Do nothing",
+  "agent_command": ["echo", "agent finished"],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "alpine:latest",
+    "timeout_seconds": 10
+  },
+  "optimization": {
+    "target_rules_file": "rules.json",
+    "epochs": 1,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "dummy",
+      "model": "dummy"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Dummy Pass",
+      "type": "host_bash",
+      "script": ["exit", "0"],
+      "weight": 1.0
+    }
+  ]
+}

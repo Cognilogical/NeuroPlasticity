@@ -3,20 +3,22 @@
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat /project/.neuroplasticity/rules.json > rules.txt 2>/dev/null || echo '' > rules.txt && /user_home/.opencode/bin/opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+    "cat /project/.neuroplasticity/rules.json > rules.txt 2>/dev/null || echo '' > rules.txt && /usr/local/bin/opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
   ],
   "sandbox": {
     "engine": "podman",
-    "base_image": "ubuntu:22.04",
-    "setup_script": [
-      "apt-get update && apt-get install -y curl ca-certificates jq nodejs npm",
-      "curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/main/install.sh | bash"
-    ],
+    "base_image": "node:20-slim",
+    "setup_script": [],
     "workspace": {
       "project_mount": "/project",
       "scratch_mount": "/workspace"
     },
     "mounts": [
+      {
+        "source": "~/.opencode/bin/opencode",
+        "target": "/usr/local/bin/opencode",
+        "readonly": true
+      },
       {
         "source": "~/.config/opencode",
         "target": "/user_home/.config/opencode",

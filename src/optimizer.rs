@@ -22,9 +22,16 @@ pub async fn run_llm_optimizer(
     config: &MetaLlmConfig,
     failing_logs: &str,
     task_prompt: &str,
+    existing_rules: &[String],
 ) -> Result<String> {
-    let system_prompt = "You are the NeuroPlasticity Meta-Optimizer. Read the failing test logs and output ONLY a JSON rule to fix the agent's behavior. Format as a string: 'Rule: ...'";
-    let user_prompt = format!("Task: {}\n\nFailing Logs:\n{}", task_prompt, failing_logs);
+    let system_prompt = "You are the NeuroPlasticity Meta-Optimizer. Your job is to generate a new behavioral rule to fix the agent's failure. 
+You must ONLY output a valid JSON string (or just plain text). Keep it under 2 sentences.
+Format your output strictly as: 'Rule: <your rule>'
+DO NOT suggest rules that are already in the Existing Rules array. The agent already failed with those rules active.";
+    
+    let rules_json = serde_json::to_string_pretty(existing_rules).unwrap_or_else(|_| "[]".to_string());
+    
+    let user_prompt = format!("Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\nFailing Logs:\n{}", task_prompt, rules_json, failing_logs);
     
     ask_llm(config, system_prompt, &user_prompt).await
 }
@@ -38,8 +45,8 @@ pub async fn run_optimizer(score: f64, pass_threshold: f64, task_prompt: &str, s
 
     println!("Score {} < pass threshold {}. Generating rules overlay...", score, pass_threshold);
 
-    // Call the dynamic provider
-    let new_rule = run_llm_optimizer(config, stderr, task_prompt).await?;
+    let existing_rules: Vec<String> = vec![];
+    let new_rule = run_llm_optimizer(config, stderr, task_prompt, &existing_rules).await?;
 
     let mocked_rules = vec![
         new_rule,

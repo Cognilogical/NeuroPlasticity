@@ -23,6 +23,8 @@ pub struct Sandbox {
     pub workspace: Option<WorkspaceConfig>,
     #[serde(default)]
     pub mounts: Option<Vec<MountConfig>>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

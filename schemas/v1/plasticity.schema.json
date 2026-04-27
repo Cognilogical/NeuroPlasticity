@@ -60,6 +60,11 @@
             }
           }
         },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Maximum allowed runtime for the agent in the container. Defaults to 120 seconds.",
+          "default": 120
+        },
         "mounts": {
           "type": "array",
           "items": {
