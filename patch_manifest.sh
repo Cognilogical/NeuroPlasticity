@@ -1,3 +1,0 @@
-sed -i 's/pub struct Evaluator {/#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]\n#[serde(rename_all = "snake_case")]\npub enum EvaluatorType {\n    #[default]\n    HostBash,\n    Container,\n    Llm,\n}\n\n#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct Evaluator {/g' src/manifest.rs
-
-sed -i '/pub script: Vec<String>,/c\    #[serde(default)]\n    pub r#type: EvaluatorType,\n    pub script: Option<Vec<String>>,\n    pub image: Option<String>,\n    pub command: Option<Vec<String>>,\n    pub setup_script: Option<Vec<String>>,\n    pub prompt: Option<String>,\n    pub target_file: Option<String>,' src/manifest.rs
