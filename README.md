@@ -106,10 +106,13 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
 ```
 
 **2. Run the CLI tool (with embedded local inference):**
-No API keys required for the Meta-Optimizer. The embedded `llama.cpp` engine will automatically download a fast 4-bit `Qwen2.5` model to your local cache.
+No API keys required for the Meta-Optimizer. If you downloaded the pre-compiled binary from our releases page, it already includes the embedded `llama.cpp` engine. It will automatically download a fast 4-bit `Qwen2.5` model to your local cache.
 ```bash
-cargo run --features embedded-llm
+./neuroplasticity-linux-x86_64
+# Or on Mac: ./neuroplasticity-macos-aarch64
 ```
+
+*(If you are compiling from source, use `cargo run --release --features embedded-llm`)*
 
 ### What Happens:
 *   **Epoch 1:** NeuroPlasticity mounts your host project as Read-Only (`/project`), installs `claude-code` JIT, and runs it. The agent writes the file, but includes markdown backticks. `jq` fails with a parse error.
