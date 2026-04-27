@@ -1,35 +1,43 @@
 # NeuroPlasticity Architecture
 
-NeuroPlasticity is a highly isolated, self-healing testing environment for AI CLI agents. Its architecture is designed to securely sandbox agent execution, evaluate the results deterministically (or probabilistically via LLMs), and automatically mutate the agent's prompt to fix failures in subsequent epochs.
+NeuroPlasticity is a highly isolated, self-healing testing environment for AI CLI agents. Its architecture is designed to securely sandbox agent execution, evaluate the results concurrently, and automatically mutate the agent's prompt to fix failures in subsequent epochs.
 
 ---
 
-## 1. The Meta-Optimization Loop
+## 1. The Meta-Optimization Loop & Fast-Path Cache
 
-At the core of NeuroPlasticity is the evaluation and optimization loop. If an agent fails to accomplish its task, the orchestrator feeds the `stderr` and evaluation results to an embedded Meta-Optimizer LLM (e.g., Qwen2.5-Coder). The LLM generates behavioral constraints that are injected into the agent's context for the next run.
+At the core of NeuroPlasticity is the evaluation and optimization loop. If an agent fails to accomplish its task, the orchestrator feeds the `stderr` and evaluation results to an embedded Meta-Optimizer LLM. 
+
+To save immense amounts of compute time (and LLM tokens), NeuroPlasticity v1.0.1 introduces the **Deterministic Fingerprint Cache**. Before spinning up a 120-second container, it hashes the entire test configuration. If that exact configuration previously failed, it skips execution and instantly feeds the cached logs back to the optimizer to force a new breakthrough rule.
 
 ```mermaid
 graph TD
-    A[Start Epoch] --> B[Provision Ephemeral Workspace]
-    B --> C[Execute Target Agent inside Podman]
-    C --> D[Run Tri-State Evaluators]
-    D --> E{Score >= Threshold?}
+    A[Start Epoch] --> B{Check Fingerprint Cache}
+    B -- Known Failure --> C[Load Cached stdout/stderr/score]
+    B -- Cache Miss --> D[Provision Ephemeral Workspace]
+    D --> E[Execute Target Agent inside Podman]
+    E --> F[Run Tri-State Evaluators Concurrently]
     
-    E -- Yes --> F[Success! Generate Improvement Patch]
+    F --> G{Score >= Threshold?}
+    C --> G
     
-    E -- No --> G[Meta-Optimizer LLM analyzes logs]
-    G --> H[Generate new rules in .neuroplasticity/rules.json]
-    H --> |Next Epoch| B
+    G -- Yes --> H[Success! Generate Improvement Patch]
+    
+    G -- No --> I[Save Fingerprint to Cache]
+    I --> J[Meta-Optimizer LLM analyzes logs + existing rules]
+    J --> K[Generate new rules in .neuroplasticity/rules.json]
+    K --> |Next Epoch| B
 
-    style F fill:#2e8b57,stroke:#fff,stroke-width:2px,color:#fff
-    style G fill:#b22222,stroke:#fff,stroke-width:2px,color:#fff
+    style H fill:#2e8b57,stroke:#fff,stroke-width:2px,color:#fff
+    style J fill:#b22222,stroke:#fff,stroke-width:2px,color:#fff
+    style B fill:#d4af37,stroke:#333,stroke-width:2px,color:#000
 ```
 
 ---
 
 ## 2. Hybrid Workspace (Zero-Copy Architecture)
 
-Historically, testing agents required deep-copying the entire host repository to prevent accidental corruption. This was prohibitively slow for large codebases. NeuroPlasticity v3 introduces the **Hybrid Workspace**.
+Historically, testing agents required deep-copying the entire host repository to prevent accidental corruption. This was prohibitively slow for large codebases. NeuroPlasticity introduces the **Hybrid Workspace**.
 
 Instead of copying files, the host repository is mounted into the container as **Read-Only**. The agent is provided a separate, ephemeral scratch directory mounted as **Read-Write**.
 
@@ -92,35 +100,23 @@ flowchart TD
 
 ---
 
-## 4. Zero-Dockerfile JIT Setup
+## 4. Zero-Dockerfile JIT Setup & Timeouts
 
-To avoid maintaining dozens of custom Dockerfiles for different agents, NeuroPlasticity uses standard, minimalistic base images (e.g., `node:20-slim` or `python:3.12-slim`). 
+To avoid maintaining dozens of custom Dockerfiles for different agents, NeuroPlasticity uses standard, minimalistic base images (e.g., `node:20-slim` or `python:3.12-slim`). The agent is installed Just-In-Time (JIT) using the `setup_script` array.
 
-The agent is installed Just-In-Time (JIT) using the `setup_script` array in the `plasticity.json` manifest.
-
-```json
-"sandbox": {
-  "engine": "podman",
-  "base_image": "node:20-slim",
-  "setup_script": [
-    "npm install -g cspell",
-    "chmod +x /usr/local/bin/opencode"
-  ]
-}
-```
-The Rust orchestrator dynamically compiles this array into a safe, single-line shell command joined with the `agent_command`, completely eliminating the need for Dockerfiles.
+To protect host CI resources from hanging, all container executions are wrapped in asynchronous `tokio` timeouts (default 120s) with active `SIGTERM` and `SIGINT` trapping. If an agent (or reasoning LLM) hangs, the orchestrator forcefully kills the orphaned Podman container before exiting.
 
 ---
 
-## 5. Tri-State Evaluators
+## 5. Tri-State Evaluators (Massively Parallel)
 
-Evaluating the output of an AI agent is notoriously difficult. Raw bash one-liners are brittle, but forcing users to install Python or Node.js on their host machine to run AST parsers defeats the purpose of a standalone Rust binary.
+Evaluating the output of an AI agent is notoriously difficult. NeuroPlasticity solves this with **Tri-State Evaluators**.
 
-NeuroPlasticity solves this with **Tri-State Evaluators**. The `evaluators` array supports three distinct execution environments:
+Every evaluator defined in `plasticity.json` is spawned as an asynchronous `tokio` task, meaning **all tests run concurrently**. Grading an epoch takes only as long as your single slowest test.
 
 ```mermaid
 flowchart TD
-    Eval[Tri-State Evaluators]
+    Eval[Tri-State Evaluators run concurrently via futures::join_all]
     
     Eval -->|type: host_bash| HB[Host Bash]
     HB -.-> HBD[Fast, lightweight POSIX shell commands.<br>Runs directly on the host machine.<br><i>e.g., checking if a file exists.</i>]
@@ -132,16 +128,13 @@ flowchart TD
     L -.-> LD[Feeds the document to local llama.cpp.<br>Prompt-based qualitative grading (PASS/FAIL).<br><i>e.g., Checking tone, pronouns, structural intent.</i>]
 ```
 
+### The LLM Semaphore
+Because executing 5 LLM evaluators simultaneously using local `llama.cpp` would instantly OOM crash a machine, NeuroPlasticity uses an `Arc<Semaphore>`. If `provider == "embedded"`, LLM concurrency is strictly limited to 1 (queueing safely). Cloud providers (GitHub, OpenAI) scale up to 10 concurrent requests to maximize speed.
+
 ---
 
 ## 6. Global Model Caching (Offline-First)
 
 When the `embedded-llm` feature is active, NeuroPlasticity runs entirely offline using `llama.cpp`. To respect the user's disk space, it does not blindly download 5GB GGUF models.
 
-Instead, the Rust engine scans universally accepted POSIX model caches across the system before attempting a download:
-1. `~/.cache/huggingface/hub/`
-2. `~/.ollama/models/blobs/`
-3. `~/.cache/lm-studio/models/`
-4. `~/.cache/neuro/models/`
-
-If a compatible model (e.g., `Qwen2.5-Coder`) is found anywhere on the system, it is mapped directly into memory.
+Instead, the Rust engine scans universally accepted POSIX model caches across the system before attempting a download (`~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, etc.). If a compatible model is found, it is mapped directly into memory.
