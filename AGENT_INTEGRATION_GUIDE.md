@@ -58,6 +58,7 @@ This file defines the sandbox. You must define the task, map the user's authenti
   "evaluators": [
     {
       "name": "Verify JSON Output",
+      "type": "host_bash",
       "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
       "weight": 1.0
     }
@@ -68,7 +69,11 @@ This file defines the sandbox. You must define the task, map the user's authenti
 ### 🧠 Critical Directives for Agents:
 1. **The `setup_script` array:** Use this to run `npm install -g`, `pip install`, or `curl` commands to install your CLI into the base image.
 2. **The `mounts` array (Zero-Config Auth):** If you require authentication (like `~/.claude.json`, `~/.config/opencode`, or `~/.local/share/opencode`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
-3. **The `evaluators` script:** You must write a bash script that returns `exit 0` on success and `exit 1` on failure. If the test fails, **you must `echo` a highly descriptive error message to `>&2` (stderr)**. The Meta-Optimizer reads this `stderr` message to learn what you did wrong.
+3. **The `evaluators` array:** You must define your tests. NeuroPlasticity supports three `type`s of evaluators:
+   - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure.
+   - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.
+   - `llm`: Prompt-based grading using the embedded LLM. Requires a `target_file` and `prompt`.
+   If a test fails, you must return a clear error (e.g., `echo` to stderr or fail the LLM prompt). The Meta-Optimizer reads this failure to learn what you did wrong.
 4. **The Feedback Loop:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2!
 
 **Your Next Step:**

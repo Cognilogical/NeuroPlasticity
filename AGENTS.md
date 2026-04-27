@@ -36,6 +36,13 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## NeuroPlasticity Tri-State Evaluators
+
+When creating tests or evaluators for NeuroPlasticity (`plasticity.json`), use the new Tri-State system via the `type` field:
+1. `host_bash`: Use `script` for local lightweight shell checks.
+2. `container`: Use `image`, `setup_script`, and `command` for isolated dependency testing.
+3. `llm`: Use `target_file` and `prompt` for LLM-based grading.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

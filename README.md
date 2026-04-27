@@ -22,7 +22,11 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Zero-Dockerfile JIT Setup:** No need to build custom, bloated container images. NeuroPlasticity uses standard base images (like `node:20-slim` or `python:3.12-slim`) and installs your agent Just-In-Time using a `setup_script` array in your manifest.
 *   **Zero-Config Auth:** Mount host credential directories (e.g., `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`) as read-only to bypass complex OAuth flows in ephemeral sandboxes.
 *   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads.
-*   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and deterministic `bash` evaluators in a strict, schema-backed JSON manifest.
+*   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
+*   **Tri-State Evaluators:** Evaluate your agents exactly how you need:
+    1. `host_bash`: Fast, lightweight POSIX shell commands running locally.
+    2. `container`: Isolated evaluation containers for heavy dependencies (Node.js, `pytest`, etc.) without host pollution.
+    3. `llm`: Embedded `llama.cpp` prompt-based grading for nuanced checks (tone, style) returning PASS/FAIL.
 
 ## ⚡ How It Works
 
@@ -74,8 +78,24 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
   },
   "evaluators": [
     {
-      "name": "Strict JSON Check",
+      "name": "Strict JSON Check (Local Shell)",
+      "type": "host_bash",
       "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! Did you use markdown blocks?' >&2; exit 1)"],
+      "weight": 1.0
+    },
+    {
+      "name": "Python AST Validation (Isolated Container)",
+      "type": "container",
+      "image": "python:3.12-slim",
+      "setup_script": ["pip install astroid"],
+      "command": ["python", "-c", "import ast; ast.parse(open('/workspace/output.py').read())"],
+      "weight": 1.0
+    },
+    {
+      "name": "Tone and Pronoun Check (LLM Grader)",
+      "type": "llm",
+      "target_file": "/workspace/summary.json",
+      "prompt": "Grade this output: Fail if it uses first-person pronouns (I, me, my). Pass otherwise.",
       "weight": 1.0
     }
   ]
