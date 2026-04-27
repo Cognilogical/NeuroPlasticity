@@ -1,0 +1,43 @@
+{
+  "name": "test-evaluators",
+  "task_prompt": "Write a funny resume",
+  "agent_command": [
+    "bash", "-c",
+    "echo '# Experience\nI am a very funny person. We did some coding.' > resume.md"
+  ],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "node:20-slim"
+  },
+  "optimization": {
+    "target_rules_file": ".neuroplasticity/rules.json",
+    "epochs": 1,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "embedded",
+      "model": "qwen-local"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Host Bash Exists",
+      "type": "host_bash",
+      "script": ["bash", "-c", "test -f resume.md"],
+      "weight": 1.0
+    },
+    {
+      "name": "LLM Pronoun Check",
+      "type": "llm",
+      "target_file": "resume.md",
+      "prompt": "Does this text use first-person pronouns like 'I' or 'We'? Reply FAIL if it does, PASS if it does not.",
+      "weight": 1.0
+    },
+    {
+      "name": "Container Parser",
+      "type": "container",
+      "image": "node:20-slim",
+      "command": ["node", "-e", "const fs = require('fs'); const txt = fs.readFileSync('resume.md', 'utf8'); if (!txt.includes('funny')) process.exit(1);"],
+      "weight": 1.0
+    }
+  ]
+}

@@ -75,9 +75,25 @@ fn default_provider() -> String {
     "github".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatorType {
+    #[default]
+    HostBash,
+    Container,
+    Llm,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evaluator {
     pub name: String,
-    pub script: Vec<String>,
+    #[serde(default)]
+    pub r#type: EvaluatorType,
+    pub script: Option<Vec<String>>,
+    pub image: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub setup_script: Option<Vec<String>>,
+    pub prompt: Option<String>,
+    pub target_file: Option<String>,
     pub weight: f64,
 }

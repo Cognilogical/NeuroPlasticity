@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RuleSet {
@@ -17,82 +16,17 @@ pub struct Metadata {
 }
 
 use crate::manifest::MetaLlmConfig;
+use crate::llm_client::ask_llm;
 
 pub async fn run_llm_optimizer(
     config: &MetaLlmConfig,
     failing_logs: &str,
     task_prompt: &str,
 ) -> Result<String> {
-    if config.provider == "embedded" {
-        #[cfg(feature = "embedded-llm")]
-        {
-            return crate::embedded_llm::run_embedded_llm(task_prompt, failing_logs, config.model_path.as_ref()).await;
-        }
-        #[cfg(not(feature = "embedded-llm"))]
-        {
-            anyhow::bail!("The 'embedded' provider requires the 'embedded-llm' feature to be enabled during build.");
-        }
-    }
-    let (url, token) = if config.provider == "github" {
-        // 1. Get the local GitHub CLI token automatically
-        let output = Command::new("gh")
-            .arg("auth")
-            .arg("token")
-            .output()
-            .context("Failed to execute gh auth token")?;
-        
-        let gh_token = String::from_utf8(output.stdout)?.trim().to_string();
-
-        if gh_token.is_empty() {
-            anyhow::bail!("GitHub token is empty. Please run `gh auth login`.");
-        }
-        
-        ("https://models.inference.ai.azure.com/chat/completions".to_string(), gh_token)
-    } else {
-        // 2. Generic OpenAI-compatible endpoint
-        let url = config.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
-        let env_var = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-        let api_key = std::env::var(env_var).unwrap_or_default();
-        
-        if api_key.is_empty() {
-            anyhow::bail!("API key environment variable {} is empty.", env_var);
-        }
-        
-        (url, api_key)
-    };
-
-    // 3. Build standard OpenAI-compatible payload
-    let payload = serde_json::json!({
-        "model": config.model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are the NeuroPlasticity Meta-Optimizer. Read the failing test logs and output ONLY a JSON rule to fix the agent's behavior. Format as a string: 'Rule: ...'"
-            },
-            {
-                "role": "user",
-                "content": format!("Task: {}\n\nFailing Logs:\n{}", task_prompt, failing_logs)
-            }
-        ]
-    });
-
-    let client = reqwest::Client::new();
-    let res = client.post(&url)
-        .bearer_auth(token)
-        .json(&payload)
-        .send()
-        .await
-        .context("Failed to send request to LLM API")?;
-
-    let response_json: serde_json::Value = res.json().await.context("Failed to parse JSON response")?;
-
-    // 4. Extract the mutated rule
-    let new_rule = response_json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("Fallback rule: avoid previous mistakes")
-        .to_string();
-
-    Ok(new_rule)
+    let system_prompt = "You are the NeuroPlasticity Meta-Optimizer. Read the failing test logs and output ONLY a JSON rule to fix the agent's behavior. Format as a string: 'Rule: ...'";
+    let user_prompt = format!("Task: {}\n\nFailing Logs:\n{}", task_prompt, failing_logs);
+    
+    ask_llm(config, system_prompt, &user_prompt).await
 }
 
 /// Runs the meta-optimizer and writes a rules overlay if the score is below the pass threshold.

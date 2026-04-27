@@ -150,8 +150,8 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
 }
 
 pub async fn run_embedded_llm(
-    task_prompt: &str,
-    failing_logs: &str,
+    system_prompt: &str,
+    user_prompt: &str,
     model_path: Option<&String>,
 ) -> Result<String> {
     let actual_model_path = ensure_model_downloaded(model_path).await?;
@@ -170,9 +170,6 @@ pub async fn run_embedded_llm(
     let mut ctx = model.new_context(&backend, ctx_params)
         .context("Failed to create llama context")?;
 
-    let system_prompt = "You are the NeuroPlasticity Meta-Optimizer. Read the failing test logs and output ONLY a JSON rule to fix the agent's behavior. Format as a string: 'Rule: ...'";
-    let user_prompt = format!("Task: {}\n\nFailing Logs:\n{}", task_prompt, failing_logs);
-    
     // Quick prompt template (ChatML / Qwen format)
     let full_prompt = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", system_prompt, user_prompt);
     

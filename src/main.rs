@@ -8,6 +8,7 @@ pub mod evaluator;
 pub mod manifest;
 pub mod optimizer;
 pub mod runner;
+pub mod llm_client;
 #[cfg(feature = "embedded-llm")]
 pub mod embedded_llm;
 
@@ -75,7 +76,9 @@ async fn main() -> Result<()> {
             &manifest.evaluators,
             scratch_path,
             pass_threshold,
-        ).context("Evaluator execution failed")?;
+            &manifest.sandbox,
+            &manifest.optimization.meta_llm,
+        ).await.context("Evaluator execution failed")?;
 
         println!("Score: {:.2} (Threshold: {:.2})", eval_result.score, eval_result.threshold);
 
