@@ -71,7 +71,7 @@ If the agent is installed globally via npm (e.g., `@anthropic-ai/claude-code`), 
 ```
 
 ### Strategy B: The Agent is a Host-Compiled Binary (e.g., Opencode)
-If the agent is a pre-compiled native binary located in the host's home directory (e.g., `~/.opencode/bin/opencode`), do NOT try to install it via NPM (it will 404). Instead, use `ubuntu:22.04` (to avoid libc/ELF mismatch errors) and map the host binary directly into the container.
+If the agent is a pre-compiled native binary located in the host's home directory (e.g., `~/.opencode/bin/opencode`), do NOT try to install it via NPM (it will 404). You can simply map the host binary directly into the container. You do NOT need a `setup_script` to install system dependencies like `apt-get` (which would fail with Permission Denied under non-root sandboxes). Use a standard image like `node:20-slim`.
 
 ```json
 {
@@ -83,10 +83,8 @@ If the agent is a pre-compiled native binary located in the host's home director
   ],
   "sandbox": {
     "engine": "podman",
-    "base_image": "ubuntu:22.04",
-    "setup_script": [
-      "apt-get update && apt-get install -y jq curl nodejs npm git"
-    ],
+    "base_image": "node:20-slim",
+    "setup_script": [],
     "workspace": {
       "project_mount": "/project",
       "scratch_mount": "/workspace"
@@ -137,7 +135,7 @@ If the agent is a pre-compiled native binary located in the host's home director
    - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.
    - `llm`: Prompt-based grading using the embedded LLM. Requires a `target_file` and `prompt`.
    If a test fails, you must return a clear error (e.g., `echo` to stderr or fail the LLM prompt). The Meta-Optimizer reads this failure to learn what you did wrong.
-4. **The Feedback Loop:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2!
+4. **The Feedback Loop & The Patch:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2! Once you successfully pass an epoch, NeuroPlasticity will output a final `neuroplasticity_patch.md` in the root directory. You should read this file and permanently add those successful rules to your own system prompt or the repository's `AGENTS.md`.
 
 **Your Next Step:**
 Acknowledge these instructions to the user, assess the specific task the user wants you to optimize yourself for, and generate the `plasticity.json` in their repository.
