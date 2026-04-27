@@ -3,13 +3,14 @@
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat /project/.neuroplasticity/rules.json > rules.txt 2>/dev/null || echo '' > rules.txt && opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+    "cat /project/.neuroplasticity/rules.json > rules.txt 2>/dev/null || echo '' > rules.txt && /user_home/.opencode/bin/opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
   ],
   "sandbox": {
     "engine": "podman",
-    "base_image": "node:20-slim",
+    "base_image": "ubuntu:22.04",
     "setup_script": [
-      "chmod +x /usr/local/bin/opencode || true"
+      "apt-get update && apt-get install -y curl ca-certificates jq nodejs npm",
+      "curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/main/install.sh | bash"
     ],
     "workspace": {
       "project_mount": "/project",
@@ -24,12 +25,7 @@
       {
         "source": "~/.local/share/opencode",
         "target": "/user_home/.local/share/opencode",
-        "readonly": true
-      },
-      {
-        "source": "~/.opencode/bin/opencode",
-        "target": "/usr/local/bin/opencode",
-        "readonly": true
+        "readonly": false
       }
     ]
   },
@@ -45,7 +41,8 @@
   "evaluators": [
     {
       "name": "Verify JSON Output",
-      "script": ["bash", "-c", "jq . summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
+      "type": "host_bash",
+      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
       "weight": 1.0
     }
   ]

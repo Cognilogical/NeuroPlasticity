@@ -17,16 +17,20 @@ When NeuroPlasticity runs your test, it spins up a container. To ensure safety a
 *   **`/workspace` (Read-Write):** A temporary, ephemeral scratch directory. **You must write your outputs, refactors, or generated files here.** This approach eliminates slow deep-copies.
 
 ## 📜 2. Writing the `plasticity.json`
-This file defines the sandbox. You must define the task, map the user's authentication configs (so you don't need API keys), write your `setup_script` to install yourself, and write a strict bash evaluator.
+This file defines the sandbox. You must define the task, map the user's authentication configs (so you don't need API keys), configure the `sandbox` to install or mount yourself, and write a strict bash evaluator.
 
-**Example `plasticity.json` (e.g., for Claude Code):**
+**You MUST choose the correct setup strategy based on how your agent is installed on the host:**
+
+### Strategy A: The Agent is an NPM Package (e.g., Claude Code)
+If the agent is installed globally via npm (e.g., `@anthropic-ai/claude-code`), do NOT mount the host binary. Use a `node:20-slim` base image and install it fresh using the `setup_script` array.
+
 ```json
 {
-  "name": "my-agent-self-evaluation",
+  "name": "claude-code-self-evaluation",
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && my-agent-cli --prompt-file rules.txt 'Analyze /project and save to /workspace/summary.json'"
+    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && claude -p \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
   ],
   "sandbox": {
     "engine": "podman",
@@ -40,8 +44,8 @@ This file defines the sandbox. You must define the task, map the user's authenti
     },
     "mounts": [
       {
-        "source": "~/.config/my-agent-cli",
-        "target": "/user_home/.config/my-agent-cli",
+        "source": "~/.claude.json",
+        "target": "/user_home/.claude.json",
         "readonly": true
       }
     ]
@@ -59,7 +63,66 @@ This file defines the sandbox. You must define the task, map the user's authenti
     {
       "name": "Verify JSON Output",
       "type": "host_bash",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
+      "script": ["bash", "-c", "jq . /workspace/summary.json || exit 1"],
+      "weight": 1.0
+    }
+  ]
+}
+```
+
+### Strategy B: The Agent is a Host-Compiled Binary (e.g., Opencode)
+If the agent is a pre-compiled native binary located in the host's home directory (e.g., `~/.opencode/bin/opencode`), do NOT try to install it via NPM (it will 404). Instead, use `ubuntu:22.04` (to avoid libc/ELF mismatch errors) and map the host binary directly into the container.
+
+```json
+{
+  "name": "opencode-self-evaluation",
+  "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
+  "agent_command": [
+    "bash", "-c", 
+    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && /usr/local/bin/opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+  ],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "ubuntu:22.04",
+    "setup_script": [
+      "apt-get update && apt-get install -y jq curl nodejs npm git"
+    ],
+    "workspace": {
+      "project_mount": "/project",
+      "scratch_mount": "/workspace"
+    },
+    "mounts": [
+      {
+        "source": "~/.opencode/bin/opencode",
+        "target": "/usr/local/bin/opencode",
+        "readonly": true
+      },
+      {
+        "source": "~/.config/opencode",
+        "target": "/user_home/.config/opencode",
+        "readonly": true
+      },
+      {
+        "source": "~/.local/share/opencode",
+        "target": "/user_home/.local/share/opencode",
+        "readonly": false
+      }
+    ]
+  },
+  "optimization": {
+    "target_rules_file": ".neuroplasticity/rules.json",
+    "epochs": 3,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "embedded",
+      "model": "qwen-local"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Verify JSON Output",
+      "type": "host_bash",
+      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON!' >&2; exit 1)"],
       "weight": 1.0
     }
   ]
@@ -67,8 +130,8 @@ This file defines the sandbox. You must define the task, map the user's authenti
 ```
 
 ### 🧠 Critical Directives for Agents:
-1. **The `setup_script` array:** Use this to run `npm install -g`, `pip install`, or `curl` commands to install your CLI into the base image.
-2. **The `mounts` array (Zero-Config Auth):** If you require authentication (like `~/.claude.json`, `~/.config/opencode`, or `~/.local/share/opencode`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/user_home/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
+1. **Choose Your Installation Strategy:** If you are an NPM package, use **Strategy A**. If you are a native pre-compiled binary, use **Strategy B**. NEVER mix the two (do not mount a host binary into a `node:20-slim` container, and do not try to run `npm install -g opencode`).
+2. **The `mounts` array (Zero-Config Auth):** Map the user's host config directory into the container's `/user_home/` directory. **CRITICAL WARNING FOR SQLITE:** If your agent relies on a local SQLite database for state (like `~/.local/share/opencode`), you MUST mount it with `"readonly": false`. If you mount an SQLite database as read-only, the agent will crash trying to acquire a WAL (Write-Ahead Log) lock.
 3. **The `evaluators` array:** You must define your tests. NeuroPlasticity supports three `type`s of evaluators:
    - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure.
    - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.
