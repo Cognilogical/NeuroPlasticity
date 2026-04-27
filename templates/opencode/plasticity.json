@@ -1,15 +1,15 @@
 {
-  "name": "claude-code-self-evaluation",
+  "name": "opencode-self-evaluation",
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && CLAUDE_NON_INTERACTIVE=1 claude-code --prompt-file rules.txt 'Analyze /project and save to /workspace/summary.json'"
+    "cat /project/.neuroplasticity/rules.json > rules.txt 2>/dev/null || echo '' > rules.txt && opencode run --dangerously-skip-permissions \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
   ],
   "sandbox": {
     "engine": "podman",
     "base_image": "node:20-slim",
     "setup_script": [
-      "npm install -g @anthropic-ai/claude-code"
+      "chmod +x /usr/local/bin/opencode || true"
     ],
     "workspace": {
       "project_mount": "/project",
@@ -17,8 +17,13 @@
     },
     "mounts": [
       {
-        "source": "~/.claude.json",
-        "target": "/root/.claude.json",
+        "source": "~/.config/opencode",
+        "target": "/root/.config/opencode",
+        "readonly": true
+      },
+      {
+        "source": "~/.opencode/bin/opencode",
+        "target": "/usr/local/bin/opencode",
         "readonly": true
       }
     ]
@@ -35,7 +40,7 @@
   "evaluators": [
     {
       "name": "Verify JSON Output",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
+      "script": ["bash", "-c", "jq . summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
       "weight": 1.0
     }
   ]

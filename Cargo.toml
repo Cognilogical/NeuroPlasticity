@@ -18,3 +18,4 @@ tokio = { version = "1.52.1", features = ["fs", "full"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 walkdir = "2.5.0"
 futures-util = { version = "0.3", optional = true }
+shellexpand = "3.1.2"

@@ -2,40 +2,24 @@
 
 **ATTENTION AI AGENT:** If a user has directed you to read this file, your task is to build a "testing gym" for yourself. The user wants you to use the **NeuroPlasticity Framework** to automatically evaluate your own performance on a specific task, find your own edge cases, and let the NeuroPlasticity Meta-Optimizer write a behavioral patch for you.
 
-To do this, you must generate two files in the user's current repository:
-1. A **`Dockerfile.testbed`** (to containerize yourself).
-2. A **`plasticity.json`** manifest (to define the sandbox, the task, and the evaluation script).
+To do this, you only need to generate **ONE file** in the user's current repository:
+A **`plasticity.json`** manifest (to define the sandbox, the task, and the evaluation script). 
+
+**We use a "Zero-Dockerfile" approach.** You do not need to write a Dockerfile. Instead, use a standard base image (e.g. `node:20-slim` or `python:3.12-slim`) and the `setup_script` array to install yourself JIT (Just-In-Time).
 
 Follow these exact architectural rules.
 
 ---
 
 ## 🏗️ 1. The Sandbox Architecture (Hybrid Workspace)
-When NeuroPlasticity runs your test, it will spin up the `Dockerfile.testbed` using Podman/Docker. 
-To ensure safety and speed, it uses a **Split Workspace**:
+When NeuroPlasticity runs your test, it spins up a container. To ensure safety and speed, it uses a **Split Workspace**:
 *   **`/project` (Read-Only):** The user's entire repository is mounted here. You can read the code, but you CANNOT modify the host project directly.
 *   **`/workspace` (Read-Write):** A temporary, ephemeral scratch directory. **You must write your outputs, refactors, or generated files here.**
 
-## 🐳 2. Writing the `Dockerfile.testbed`
-You need to write a Dockerfile that installs *you* (the agent CLI the user is currently using, e.g., Claude Code, OpenCode, Copilot).
+## 📜 2. Writing the `plasticity.json`
+This file defines the sandbox. You must define the task, map the user's authentication configs (so you don't need API keys), write your `setup_script` to install yourself, and write a strict bash evaluator.
 
-**Example for a Node-based Agent (e.g., Claude Code):**
-```dockerfile
-FROM node:20-slim
-# Install the agent
-RUN npm install -g @anthropic-ai/claude-code
-
-# The Hybrid Workspace will be mounted here by the runner
-WORKDIR /workspace
-
-# Force non-interactive mode so the test doesn't hang waiting for user input
-ENV CLAUDE_NON_INTERACTIVE=1
-```
-
-## 📜 3. Writing the `plasticity.json`
-This file connects your Dockerfile to the testing framework. You must define the task, map the user's authentication configs (so you don't need API keys in the Dockerfile), and write a strict bash evaluator.
-
-**Example `plasticity.json`:**
+**Example `plasticity.json` (e.g., for Claude Code):**
 ```json
 {
   "name": "my-agent-self-evaluation",
@@ -46,10 +30,10 @@ This file connects your Dockerfile to the testing framework. You must define the
   ],
   "sandbox": {
     "engine": "podman",
-    "build": {
-      "dockerfile": "Dockerfile.testbed",
-      "context": "."
-    },
+    "base_image": "node:20-slim",
+    "setup_script": [
+      "npm install -g @anthropic-ai/claude-code"
+    ],
     "workspace": {
       "project_mount": "/project",
       "scratch_mount": "/workspace"
@@ -82,9 +66,10 @@ This file connects your Dockerfile to the testing framework. You must define the
 ```
 
 ### 🧠 Critical Directives for Agents:
-1. **The `mounts` array:** If you (the agent) require authentication (like `~/.claude.json` or `~/.config/gh`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This allows you to run without hardcoding API keys.
-2. **The `evaluators` script:** You must write a bash script that returns `exit 0` on success and `exit 1` on failure. If the test fails, **you must `echo` a highly descriptive error message to `>&2` (stderr)**. The Meta-Optimizer reads this `stderr` message to learn what you did wrong.
-3. **The Feedback Loop:** If you fail Epoch 1, the Meta-Optimizer will write a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, you should try to `cat` or read this file and prepend it to your prompt so you learn from your mistakes in Epoch 2!
+1. **The `setup_script` array:** Use this to run `npm install -g`, `pip install`, or `curl` commands to install your CLI into the base image.
+2. **The `mounts` array:** If you require authentication (like `~/.claude.json` or `~/.config/gh`), you MUST add a Read-Only mount mapping the user's host config directory into the container's `/root/` directory. This bypasses complex OAuth flows in ephemeral sandboxes.
+3. **The `evaluators` script:** You must write a bash script that returns `exit 0` on success and `exit 1` on failure. If the test fails, **you must `echo` a highly descriptive error message to `>&2` (stderr)**. The Meta-Optimizer reads this `stderr` message to learn what you did wrong.
+4. **The Feedback Loop:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2!
 
 **Your Next Step:**
-Acknowledge these instructions to the user, assess the specific task the user wants you to optimize yourself for, and generate the `Dockerfile.testbed` and `plasticity.json` in their repository.
+Acknowledge these instructions to the user, assess the specific task the user wants you to optimize yourself for, and generate the `plasticity.json` in their repository.

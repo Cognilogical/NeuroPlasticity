@@ -19,6 +19,38 @@ pub struct Sandbox {
     pub base_image: String,
     #[serde(default)]
     pub setup_script: Option<Vec<String>>,
+    #[serde(default)]
+    pub workspace: Option<WorkspaceConfig>,
+    #[serde(default)]
+    pub mounts: Option<Vec<MountConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    #[serde(default = "default_project_mount")]
+    pub project_mount: String,
+    #[serde(default = "default_scratch_mount")]
+    pub scratch_mount: String,
+}
+
+fn default_project_mount() -> String {
+    "/project".to_string()
+}
+
+fn default_scratch_mount() -> String {
+    "/workspace".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountConfig {
+    pub source: String,
+    pub target: String,
+    #[serde(default = "default_readonly")]
+    pub readonly: bool,
+}
+
+fn default_readonly() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

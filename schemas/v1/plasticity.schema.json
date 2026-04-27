@@ -30,8 +30,8 @@
       "properties": {
         "engine": {
           "type": "string",
-          "enum": ["podman"],
-          "description": "The container engine. Currently only 'podman' is supported for rootless security."
+          "enum": ["podman", "docker"],
+          "description": "The container engine to use. Podman is preferred for rootless security."
         },
         "base_image": {
           "type": "string",
@@ -43,6 +43,40 @@
             "type": "string"
           },
           "description": "Optional command/script to run before the agent to set up the environment."
+        },
+        "workspace": {
+          "type": "object",
+          "properties": {
+            "project_mount": {
+              "type": "string",
+              "description": "The Read-Only mount path for the host project. Defaults to /project."
+            },
+            "scratch_mount": {
+              "type": "string",
+              "description": "The Read-Write mount path for the ephemeral scratch directory. Defaults to /workspace."
+            }
+          }
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "The host path to mount (e.g., ~/.config/opencode)."
+              },
+              "target": {
+                "type": "string",
+                "description": "The container path to mount to (e.g., /root/.config/opencode)."
+              },
+              "readonly": {
+                "type": "boolean",
+                "description": "Whether the mount should be read-only. Defaults to true."
+              }
+            },
+            "required": ["source", "target"]
+          }
         }
       },
       "required": ["engine", "base_image"]

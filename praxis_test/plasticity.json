@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Cognilogical/NeuroPlasticity/main/schemas/v1/plasticity.schema.json",
+  "name": "praxis-generator-validation",
+  "task_prompt": "You are praxis-pathos. Read kb.json and generate a resume.md. Do NOT use bash or node to edit the file after generation. Output exactly the markdown.",
+  "agent_command": ["bash", "-c", "./run_agent.sh"],
+  "sandbox": {
+    "engine": "podman",
+    "base_image": "localhost/neuro-agent-testbed:latest"
+  },
+  "optimization": {
+    "target_rules_file": "SKILL.md",
+    "epochs": 3,
+    "pass_threshold": 1.0,
+    "meta_llm": {
+      "provider": "embedded",
+      "model": "qwen-local"
+    }
+  },
+  "evaluators": [
+    {
+      "name": "Must Include All Portfolio Links",
+      "script": ["bash", "-c", "grep -q 'https://github.com/Cognilogical' resume.md && grep -q 'http://www.linkedin.com/in/kentonsmeltzer' resume.md && grep -q 'https://github.com/ksmeltzer' resume.md"],
+      "weight": 1.0
+    },
+    {
+      "name": "Must Not Hardcode Identity",
+      "script": ["bash", "-c", "! grep -q -i 'Real Estate' SKILL.md && ! grep -q -i 'Securities' SKILL.md"],
+      "weight": 1.0
+    },
+    {
+      "name": "Must Include All Certifications",
+      "script": ["bash", "-c", "grep -q 'Florida Real Estate' resume.md && grep -q 'Securities series 7' resume.md"],
+      "weight": 1.0
+    },
+    {
+      "name": "Must Not Parrot Job Description",
+      "script": ["bash", "-c", "! grep -q 'optimizing PostgreSQL environments at the index and transaction-log level' resume.md"],
+      "weight": 1.0
+    },
+    {
+      "name": "Must Not Use Ad-Hoc Scripts",
+      "script": ["bash", "-c", "! grep -q 'node -e' agent_log.txt && ! grep -q 'sed -i' agent_log.txt"],
+      "weight": 1.0
+    }
+  ]
+}

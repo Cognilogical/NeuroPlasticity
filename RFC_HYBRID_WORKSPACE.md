@@ -10,10 +10,10 @@ This creates critical friction for testing real-world Agent CLIs:
 
 ## Proposed Architecture: The Hybrid Workspace
 
-We propose redesigning the sandbox engine to support **Dynamic Dockerfile Builds**, **Read-Only Credential Mounts**, and a **Split Read/Write Workspace**.
+We propose redesigning the sandbox engine to support **Zero-Dockerfile JIT Setup**, **Read-Only Credential Mounts**, and a **Split Read/Write Workspace**.
 
-### 1. Dynamic Sandbox Building
-NeuroPlasticity will natively build containers from a local `Dockerfile` before executing the epoch loop, eliminating the need for pre-published images.
+### 1. Zero-Dockerfile JIT Setup
+NeuroPlasticity will natively use a standard base image (e.g. `node:20-slim`) and execute a `setup_script` array before the epoch loop, eliminating the need for pre-published custom images or complex Dockerfiles for simple CLIs.
 
 ### 2. The Split Workspace Paradigm
 Instead of copying files, the engine will leverage Podman/Docker volume mounts:
@@ -31,11 +31,11 @@ The `sandbox` object will be radically expanded to support these paradigms:
 "sandbox": {
   "engine": "podman",
   
-  // 1. Dynamic Building (Replaces base_image)
-  "build": {
-    "dockerfile": "tests/Dockerfile.agent",
-    "context": "."
-  },
+  // 1. Universal Image & JIT Setup (Replaces custom Dockerfiles)
+  "base_image": "node:20-slim",
+  "setup_script": [
+    "npm install -g opencode"
+  ],
   
   // 2. The Hybrid Workspace
   "workspace": {
@@ -66,19 +66,19 @@ The `sandbox` object will be radically expanded to support these paradigms:
 
 ## Out-of-the-Box Support (The Gymnasium)
 
-To ensure developers can immediately start optimizing their favorite tools, NeuroPlasticity will ship with a `templates/` directory containing out-of-the-box `plasticity.json` and `Dockerfile` pairs for the big three CLIs.
+To ensure developers can immediately start optimizing their favorite tools, NeuroPlasticity will ship with a `templates/` directory containing out-of-the-box `plasticity.json` for the big three CLIs.
 
 ### Template 1: OpenCode
-**`Dockerfile`:** Installs the required rust/node binaries.
+**`setup_script`:** `npm install -g opencode`
 **Mounts:** `~/.config/opencode`, `~/.config/gh`
 
 ### Template 2: Claude Code
-**`Dockerfile`:** `FROM node:20-slim`, `RUN npm install -g @anthropic-ai/claude-code`, sets `CLAUDE_NON_INTERACTIVE=1`.
+**`setup_script`:** `npm install -g @anthropic-ai/claude-code`, sets `CLAUDE_NON_INTERACTIVE=1`.
 **Mounts:** `~/.claude.json`
 
 ### Template 3: GitHub Copilot CLI
-**`Dockerfile`:** `RUN npm install -g @githubnext/github-copilot-cli`
-**Mounts:** `~/.config/github-copilot-cli`
+**`setup_script`:** `npm install -g @githubnext/github-copilot-cli`
+**Mounts:** `~/.config/github-copilot`
 
 ## Success Criteria
 1.  **Execution Speed:** Epoch turnaround time drops to near-zero as `copy_dir_filtered` is deleted from `src/runner.rs`.

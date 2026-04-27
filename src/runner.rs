@@ -1,9 +1,8 @@
-use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
 use anyhow::Result;
 use tempfile::TempDir;
+use crate::manifest::Sandbox;
 
 pub struct RunnerResult {
     pub stdout: String,
@@ -12,10 +11,10 @@ pub struct RunnerResult {
     pub scratch_dir: TempDir,
 }
 
-pub fn setup_workspace(project_dir: &Path) -> Result<TempDir> {
+pub fn setup_workspace(_project_dir: &Path) -> Result<TempDir> {
+    // We no longer copy the entire project directory.
+    // Instead we just create an empty scratch directory for the agent to write outputs.
     let scratch_dir = tempfile::Builder::new().prefix("neuroplasticity-run-").tempdir()?;
-    let scratch_path = scratch_dir.path();
-    copy_dir_filtered(project_dir, scratch_path)?;
     Ok(scratch_dir)
 }
 
@@ -51,12 +50,12 @@ fn detect_container_engine(preferred: &str) -> Result<(String, bool)> {
 }
 
 pub fn run_agent(
+    project_dir: &Path,
     scratch_path: &Path,
-    engine_preference: &str,
-    base_image: &str,
+    sandbox: &Sandbox,
     agent_command: &[String],
 ) -> Result<(String, String, bool)> {
-    let (engine, is_podman) = detect_container_engine(engine_preference)?;
+    let (engine, is_podman) = detect_container_engine(&sandbox.engine)?;
     
     let mut cmd = Command::new(&engine);
     cmd.arg("run");
@@ -79,12 +78,63 @@ pub fn run_agent(
     
     cmd.arg("--security-opt");
     cmd.arg("no-new-privileges");
+    
+    // Default Mounts from WorkspaceConfig
+    let project_mount = sandbox.workspace.as_ref().map_or("/project", |w| &w.project_mount);
+    let scratch_mount = sandbox.workspace.as_ref().map_or("/workspace", |w| &w.scratch_mount);
+
+    // Read-only project mount
     cmd.arg("-v");
-    cmd.arg(&format!("{}:/workspace:Z", scratch_path.display()));
+    cmd.arg(&format!("{}:{}:ro,Z", project_dir.display(), project_mount));
+
+    // Read-write scratch mount
+    cmd.arg("-v");
+    cmd.arg(&format!("{}:{}:rw,Z", scratch_path.display(), scratch_mount));
+
+    // Custom Mounts
+    if let Some(mounts) = &sandbox.mounts {
+        for mount in mounts {
+            let expanded_source = shellexpand::tilde(&mount.source).to_string();
+            let source_path = PathBuf::from(expanded_source);
+            if !source_path.exists() {
+                println!("⚠️  Mount source {} does not exist, skipping.", mount.source);
+                continue;
+            }
+            let ro_flag = if mount.readonly { "ro," } else { "" };
+            cmd.arg("-v");
+            cmd.arg(&format!("{}:{}:{}Z", source_path.display(), mount.target, ro_flag));
+        }
+    }
+
     cmd.arg("--workdir");
-    cmd.arg("/workspace");
-    cmd.arg(base_image);
-    cmd.args(agent_command);
+    cmd.arg(scratch_mount);
+
+    cmd.arg(&sandbox.base_image);
+
+    // Setup script support
+    if let Some(setup_script) = &sandbox.setup_script {
+        if !setup_script.is_empty() {
+            let joined_script = setup_script.join(" && ");
+            
+            // We need to properly quote the agent_command elements to form a valid shell command
+            let quoted_agent_cmd: Vec<String> = agent_command.iter().map(|s| {
+                if s.contains(' ') || s.contains('"') || s.contains('\'') || s.contains('*') || s.contains('$') {
+                    format!("'{}'", s.replace('\'', "'\\''"))
+                } else {
+                    s.clone()
+                }
+            }).collect();
+            
+            let full_command = format!("{} && {}", joined_script, quoted_agent_cmd.join(" "));
+            cmd.arg("sh");
+            cmd.arg("-c");
+            cmd.arg(&full_command);
+        } else {
+            cmd.args(agent_command);
+        }
+    } else {
+        cmd.args(agent_command);
+    }
 
     let output = cmd.output()?;
 
@@ -94,37 +144,3 @@ pub fn run_agent(
     Ok((stdout, stderr, output.status.success()))
 }
 
-fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
-    for entry in WalkDir::new(src) {
-        let entry = entry?;
-        let path = entry.path();
-        
-        let relative_path = path.strip_prefix(src).unwrap();
-        
-        // Skip root
-        if relative_path.as_os_str().is_empty() {
-            continue;
-        }
-
-        // Check if path contains .git or .neuroplasticity
-        let should_ignore = relative_path.components().any(|c| {
-            c.as_os_str() == ".git" || c.as_os_str() == ".neuroplasticity"
-        });
-
-        if should_ignore {
-            continue;
-        }
-
-        let target_path = dst.join(relative_path);
-
-        if path.is_dir() {
-            fs::create_dir_all(&target_path)?;
-        } else if path.is_file() {
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(path, &target_path)?;
-        }
-    }
-    Ok(())
-}

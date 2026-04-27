@@ -16,9 +16,25 @@ async fn main() -> Result<()> {
     println!("=== NeuroPlasticity Orchestrator ===");
 
     // 1. Parse & Validate Manifest
-    let manifest_path = Path::new("plasticity.json");
+    let mut args = std::env::args();
+    // Skip executable name
+    args.next();
+    
+    // Parse arguments
+    let mut manifest_path_str = "plasticity.json".to_string();
+    while let Some(arg) = args.next() {
+        if arg == "test" {
+            if let Some(path) = args.next() {
+                manifest_path_str = path;
+            }
+        } else if !arg.starts_with("--") {
+            manifest_path_str = arg;
+        }
+    }
+    
+    let manifest_path = Path::new(&manifest_path_str);
     if !manifest_path.exists() {
-        anyhow::bail!("plasticity.json not found in the current directory.");
+        anyhow::bail!("Manifest file {:?} not found.", manifest_path);
     }
     
     let manifest_content = fs::read_to_string(manifest_path)
@@ -47,9 +63,9 @@ async fn main() -> Result<()> {
         // 3. Execute Agent in Podman
         println!("Executing agent in sandbox ({})...", base_image);
         let (stdout, stderr, _success) = runner::run_agent(
+            Path::new("."),
             scratch_path,
-            &manifest.sandbox.engine,
-            base_image,
+            &manifest.sandbox,
             agent_command,
         ).context("Failed to run agent in container sandbox")?;
 

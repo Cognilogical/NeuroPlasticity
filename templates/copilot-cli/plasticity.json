@@ -1,15 +1,15 @@
 {
-  "name": "claude-code-self-evaluation",
+  "name": "copilot-cli-self-evaluation",
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && CLAUDE_NON_INTERACTIVE=1 claude-code --prompt-file rules.txt 'Analyze /project and save to /workspace/summary.json'"
+    "cat .neuroplasticity/rules.json > rules.txt && github-copilot-cli 'Analyze /project and save to /workspace/summary.json'"
   ],
   "sandbox": {
     "engine": "podman",
     "base_image": "node:20-slim",
     "setup_script": [
-      "npm install -g @anthropic-ai/claude-code"
+      "npm install -g @githubnext/github-copilot-cli"
     ],
     "workspace": {
       "project_mount": "/project",
@@ -17,8 +17,8 @@
     },
     "mounts": [
       {
-        "source": "~/.claude.json",
-        "target": "/root/.claude.json",
+        "source": "~/.config/github-copilot",
+        "target": "/root/.config/github-copilot",
         "readonly": true
       }
     ]
