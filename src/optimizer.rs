@@ -1,19 +1,4 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct RuleSet {
-    pub rules: Vec<String>,
-    pub metadata: Metadata,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Metadata {
-    pub generation_reason: String,
-    pub original_score: f64,
-}
+use anyhow::Result;
 
 use crate::manifest::MetaLlmConfig;
 use crate::llm_client::ask_llm;

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use crate::manifest::MetaLlmConfig;
-use std::process::Command;
+use tokio::process::Command;
 
 pub async fn ask_llm(
     config: &MetaLlmConfig,
@@ -24,6 +24,7 @@ pub async fn ask_llm(
             .arg("auth")
             .arg("token")
             .output()
+            .await
             .context("Failed to execute gh auth token")?;
         
         let gh_token = String::from_utf8(output.stdout)?.trim().to_string();
@@ -39,8 +40,30 @@ pub async fn ask_llm(
         let env_var = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
         
         // P0 Security Fix: Prevent exfiltration of arbitrary host env vars (like AWS_SECRET_ACCESS_KEY or SSH_PRIVATE_KEY) via malicious plasticity.json
-        if !env_var.ends_with("_API_KEY") && !env_var.ends_with("_TOKEN") && env_var != "API_KEY" {
-            anyhow::bail!("Security Exception: To prevent credential exfiltration, `api_key_env` must end in '_API_KEY' or '_TOKEN'. Attempted to use: {}", env_var);
+        // Hardened: Must exactly match known patterns, not just suffixes
+        let is_valid_env_var = env_var == "API_KEY" || 
+            env_var == "GITHUB_TOKEN" ||
+            env_var == "OPENAI_API_KEY" ||
+            env_var == "ANTHROPIC_API_KEY" ||
+            env_var == "GEMINI_API_KEY" ||
+            env_var == "GROQ_API_KEY" ||
+            env_var == "XAI_API_KEY" ||
+            env_var == "DEEPSEEK_API_KEY" ||
+            env_var == "TOGETHER_API_KEY";
+            
+        if !is_valid_env_var {
+            let re = regex::Regex::new(r"^[A-Z][A-Z0-9_]*_(API_KEY|TOKEN)$").unwrap();
+            let is_safe_pattern = re.is_match(env_var) 
+                && !env_var.contains("SECRET") 
+                && !env_var.contains("PRIVATE") 
+                && !env_var.contains("AWS")
+                && !env_var.contains("SSH")
+                && !env_var.contains("GCP")
+                && !env_var.contains("AZURE");
+                
+            if !is_safe_pattern {
+                anyhow::bail!("Security Exception: To prevent credential exfiltration, `api_key_env` must be a standard LLM API key name. Attempted to use: {}", env_var);
+            }
         }
         
         let api_key = std::env::var(env_var).unwrap_or_default();

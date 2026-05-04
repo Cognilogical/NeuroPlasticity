@@ -17,44 +17,14 @@ pub fn setup_workspace(_project_dir: &Path) -> Result<TempDir> {
     Ok(scratch_dir)
 }
 
-async fn check_cmd(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-async fn detect_container_engine(preferred: &str) -> Result<(String, bool)> {
-    if preferred == "docker" && check_cmd("docker").await {
-        return Ok(("docker".to_string(), false));
-    }
-    
-    if preferred == "podman" && check_cmd("podman").await {
-        return Ok(("podman".to_string(), true));
-    }
-
-    if check_cmd("podman").await {
-        println!("⚠️  Preferred engine '{}' not found. Falling back to podman.", preferred);
-        return Ok(("podman".to_string(), true));
-    }
-    
-    if check_cmd("docker").await {
-        println!("⚠️  Preferred engine '{}' not found. Falling back to docker.", preferred);
-        return Ok(("docker".to_string(), false));
-    }
-
-    anyhow::bail!("No container engine (Podman or Docker) found on this system.\nNeuroPlasticity requires Podman to run isolated sandboxes.\n\nPlease install Podman:\nUbuntu/Debian: sudo apt-get install podman\nmacOS: brew install podman\nWindows/Docs: https://podman.io/docs/installation");
-}
-
 pub async fn run_agent(
     project_dir: &Path,
     scratch_path: &Path,
     sandbox: &Sandbox,
     agent_command: &[String],
 ) -> Result<(String, String, bool)> {
-    let (engine, is_podman) = detect_container_engine(&sandbox.engine).await?;
+    let preferred_engine = Some(sandbox.engine.clone());
+    let (engine, is_podman) = crate::container::detect_container_engine(&preferred_engine).await?;
     let container_name = format!("neuro-run-{}", Uuid::new_v4().to_string().replace("-", ""));
     
     let mut cmd = Command::new(&engine);
@@ -97,7 +67,6 @@ pub async fn run_agent(
     cmd.arg("-e").arg("NPM_CONFIG_PREFIX=/user_home/.npm-global");
     cmd.arg("-e").arg("PATH=/user_home/.local/bin:/user_home/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
-    cmd.arg("-e").arg("CI=1");
     cmd.arg("-e").arg("CI=true");
     cmd.arg("-e").arg("CONTINUOUS_INTEGRATION=1");
     cmd.arg("-e").arg("NONINTERACTIVE=1");
@@ -163,7 +132,14 @@ pub async fn run_agent(
     
     tokio::spawn(async move {
         #[cfg(unix)]
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("⚠️ Warning: Failed to register SIGTERM handler: {}", e);
+                // Return early from spawn, just disable custom cleanup for SIGTERM
+                return;
+            }
+        };
         
         #[cfg(unix)]
         tokio::select! {

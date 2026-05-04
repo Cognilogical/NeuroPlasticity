@@ -1,7 +1,7 @@
 use crate::manifest::{Evaluator, EvaluatorType, Sandbox, MetaLlmConfig};
 use crate::llm_client::ask_llm;
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::Path;
 use tokio::process::Command;
 use futures::future::join_all;
 use std::sync::Arc;
@@ -23,24 +23,6 @@ pub struct EvaluationResult {
     pub passing_weight: f64,
     pub threshold: f64,
     pub details: Vec<EvaluatorScore>,
-}
-
-async fn check_cmd(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-async fn detect_container_engine(preferred: &str) -> Result<(String, bool)> {
-    if preferred == "docker" && check_cmd("docker").await { return Ok(("docker".to_string(), false)); }
-    if preferred == "podman" && check_cmd("podman").await { return Ok(("podman".to_string(), true)); }
-    if check_cmd("podman").await { return Ok(("podman".to_string(), true)); }
-    if check_cmd("docker").await { return Ok(("docker".to_string(), false)); }
-    
-    anyhow::bail!("No container engine found.");
 }
 
 pub async fn evaluate(
@@ -97,7 +79,8 @@ pub async fn evaluate(
                 },
                 EvaluatorType::Container => {
                     if let (Some(image), Some(command)) = (&eval_clone.image, &eval_clone.command) {
-                        let (engine, is_podman) = detect_container_engine(&sandbox_clone.engine)
+                        let preferred_engine = Some(sandbox_clone.engine.clone());
+                        let (engine, is_podman) = crate::container::detect_container_engine(&preferred_engine)
                             .await
                             .unwrap_or(("podman".to_string(), true));
                             

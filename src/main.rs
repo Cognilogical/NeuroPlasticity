@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub mod reporter;
+pub mod container;
 pub mod evaluator;
 pub mod manifest;
 pub mod optimizer;
@@ -80,6 +81,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
 
             stdout = sandbox_stdout;
             stderr = sandbox_stderr;
+            println!("=== AGENT STDOUT ===\n{}\n=== END STDOUT ===", stdout);
+            println!("=== AGENT STDERR ===\n{}\n=== END STDERR ===", stderr);
 
             // 4. Evaluate & Score
             println!("Evaluating side effects...");
@@ -213,8 +216,15 @@ async fn main() -> Result<()> {
 
     let mut final_manifest: Option<manifest::PlasticityManifest> = None;
 
+    let mut waterfall_restarts = 0;
+    let max_restarts = queue.len() * 3; // Prevent infinite loops
+    
     // The Adversarial Waterfall Loop
     'waterfall: loop {
+        if waterfall_restarts > max_restarts {
+            println!("⚠️ Waterfall Loop Cap Reached ({} restarts). Aborting to prevent infinite loops.", max_restarts);
+            break 'waterfall;
+        }
         let mut rules_mutated = false;
 
         for m in &queue {
@@ -234,6 +244,7 @@ async fn main() -> Result<()> {
 
             if epochs_taken > 1 {
                 rules_mutated = true;
+                waterfall_restarts += 1;
                 println!("\n🔄 Rules were mutated by {:?}. Restarting Waterfall from the top to ensure backward compatibility...", m);
                 break; // Break the inner loop to restart the waterfall
             }
