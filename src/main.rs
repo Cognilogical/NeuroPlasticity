@@ -203,7 +203,8 @@ async fn main() -> Result<()> {
                 queue.push(path);
             }
         }
-        queue.sort(); // Run alphabetically (e.g. 01-reasoning.json, 02-forgetful.json)
+        // Run via natural sort so 10-test.json comes AFTER 2-test.json (Issue #7)
+        queue.sort_by(|a, b| natord::compare(a.to_string_lossy().as_ref(), b.to_string_lossy().as_ref()));
     } else {
         queue.push(manifest_path.to_path_buf());
     }

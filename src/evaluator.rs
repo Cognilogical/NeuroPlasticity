@@ -6,6 +6,7 @@ use tokio::process::Command;
 use futures::future::join_all;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct EvaluatorScore {
@@ -40,6 +41,9 @@ pub async fn evaluate(
     let is_embedded = meta_llm.provider == "embedded";
     let llm_concurrency = if is_embedded { 1 } else { 10 };
     let llm_semaphore = Arc::new(Semaphore::new(llm_concurrency));
+    
+    // Prevent host CPU/RAM exhaustion from spawning 30+ containers concurrently
+    let system_semaphore = Arc::new(Semaphore::new(8));
 
     // Spawn each evaluator into an asynchronous task so they execute in parallel
     for eval in evaluators {
@@ -48,29 +52,59 @@ pub async fn evaluate(
         let sandbox_clone = sandbox.clone();
         let meta_llm_clone = meta_llm.clone();
         let llm_sem_clone = Arc::clone(&llm_semaphore);
+        let sys_sem_clone = Arc::clone(&system_semaphore);
 
         let handle = tokio::spawn(async move {
             let (success, output) = match eval_clone.r#type {
                 EvaluatorType::HostBash => {
+                    let _permit = sys_sem_clone.acquire().await.expect("Failed to acquire system semaphore");
                     if let Some(script) = &eval_clone.script {
                         if script.is_empty() {
                             (false, Some("Empty host_bash script array".to_string()))
                         } else {
-                            let mut cmd = Command::new(&script[0]);
+                            // Issue #4: Prevent Sandbox Escape
+                            let cmd_name = &script[0];
+                            let safe_commands = ["git", "jq", "cat", "ls", "grep", "echo"];
+                            let is_safe = safe_commands.contains(&cmd_name.as_str()) || 
+                                          (cmd_name.starts_with('/') && safe_commands.iter().any(|c| cmd_name.ends_with(&format!("/{}", c))));
+                            
+                            if !is_safe {
+                                return EvaluatorScore {
+                                    name: eval_clone.name.clone(),
+                                    success: false,
+                                    weight: eval_clone.weight,
+                                    output: Some(format!("Security Exception: host_bash command '{}' is not in the system allowlist. Evaluators must use container environment for arbitrary execution.", cmd_name))
+                                };
+                            }
+                            
+                            // Prevent relative path execution like "./malicious.sh"
+                            if cmd_name.contains('.') || cmd_name.contains("..") {
+                                return EvaluatorScore {
+                                    name: eval_clone.name.clone(),
+                                    success: false,
+                                    weight: eval_clone.weight,
+                                    output: Some(format!("Security Exception: host_bash command cannot be a relative file execution."))
+                                };
+                            }
+
+                            let mut cmd = Command::new(cmd_name);
                             if script.len() > 1 {
                                 cmd.args(&script[1..]);
                             }
                             cmd.current_dir(&working_dir_clone);
                             
-                            if let Ok(out) = cmd.output().await {
-                                let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
-                                if msg.is_empty() {
-                                    msg = String::from_utf8_lossy(&out.stdout).to_string();
+                            let timeout_dur = Duration::from_secs(sandbox_clone.timeout_seconds.unwrap_or(60) as u64);
+                            match tokio::time::timeout(timeout_dur, cmd.output()).await {
+                                Ok(Ok(out)) => {
+                                    let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                    if msg.is_empty() {
+                                        msg = String::from_utf8_lossy(&out.stdout).to_string();
+                                    }
+                                    println!("Evaluator '{}' output: {}", eval_clone.name, msg);
+                                    (out.status.success(), Some(msg))
                                 }
-                                println!("Evaluator '{}' output: {}", eval_clone.name, msg);
-                                (out.status.success(), Some(msg))
-                            } else {
-                                (false, Some("Failed to execute host_bash command".to_string()))
+                                Ok(Err(e)) => (false, Some(format!("Failed to execute host_bash command: {}", e))),
+                                Err(_) => (false, Some(format!("Evaluator timed out after {}s", timeout_dur.as_secs()))),
                             }
                         }
                     } else {
@@ -78,11 +112,20 @@ pub async fn evaluate(
                     }
                 },
                 EvaluatorType::Container => {
+                    let _permit = sys_sem_clone.acquire().await.expect("Failed to acquire system semaphore");
                     if let (Some(image), Some(command)) = (&eval_clone.image, &eval_clone.command) {
                         let preferred_engine = Some(sandbox_clone.engine.clone());
-                        let (engine, is_podman) = crate::container::detect_container_engine(&preferred_engine)
-                            .await
-                            .unwrap_or(("podman".to_string(), true));
+                        let (engine, is_podman) = match crate::container::detect_container_engine(&preferred_engine).await {
+                            Ok(res) => res,
+                            Err(e) => {
+                                return EvaluatorScore {
+                                    name: eval_clone.name.clone(),
+                                    success: false,
+                                    weight: eval_clone.weight,
+                                    output: Some(format!("Container engine error: {}", e))
+                                };
+                            }
+                        };
                             
                         let mut cmd = Command::new(&engine);
                         cmd.arg("run");
@@ -120,15 +163,18 @@ pub async fn evaluate(
                             cmd.args(command);
                         }
 
-                        if let Ok(out) = cmd.output().await {
-                            let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
-                            if msg.is_empty() {
-                                msg = String::from_utf8_lossy(&out.stdout).to_string();
+                        let timeout_dur = Duration::from_secs(sandbox_clone.timeout_seconds.unwrap_or(60) as u64);
+                        match tokio::time::timeout(timeout_dur, cmd.output()).await {
+                            Ok(Ok(out)) => {
+                                let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                if msg.is_empty() {
+                                    msg = String::from_utf8_lossy(&out.stdout).to_string();
+                                }
+                                println!("Evaluator '{}' output: {}", eval_clone.name, msg);
+                                (out.status.success(), Some(msg))
                             }
-                            println!("Evaluator '{}' output: {}", eval_clone.name, msg);
-                            (out.status.success(), Some(msg))
-                        } else {
-                            (false, Some("Failed to run container evaluator".to_string()))
+                            Ok(Err(e)) => (false, Some(format!("Failed to run container evaluator: {}", e))),
+                            Err(_) => (false, Some(format!("Evaluator timed out after {}s", timeout_dur.as_secs()))),
                         }
                     } else {
                         (false, Some("Missing 'image' or 'command' for container evaluator".to_string()))

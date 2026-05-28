@@ -125,6 +125,8 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
     let target_path = models_dir.join(&default_model.filename);
 
     println!("No suitable models found in cache.");
+    let temp_path = models_dir.join(format!("{}.tmp", default_model.filename));
+
     println!("Downloading {}...", default_model.filename);
     println!("This will take a few minutes but only happens once.");
 
@@ -134,7 +136,7 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
         anyhow::bail!("Failed to download model: HTTP {}", response.status());
     }
 
-    let mut file = tokio::fs::File::create(&target_path).await.context("Failed to create model file")?;
+    let mut file = tokio::fs::File::create(&temp_path).await.context("Failed to create temporary model file")?;
     let mut stream = response.bytes_stream();
     
     use futures_util::StreamExt;
@@ -143,6 +145,9 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
         let chunk = chunk.context("Error reading streaming model download")?;
         file.write_all(&chunk).await.context("Failed to write to model file")?;
     }
+    
+    // Rename temp file to final target path atomically upon completion to prevent cache pollution
+    tokio::fs::rename(&temp_path, &target_path).await.context("Failed to finalize downloaded model file")?;
     
     println!("Model downloaded successfully.");
 

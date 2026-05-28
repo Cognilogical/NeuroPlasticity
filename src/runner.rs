@@ -130,7 +130,7 @@ pub async fn run_agent(
     // Set up graceful shutdown channel for SIGTERM / SIGINT
     let (tx, rx) = tokio::sync::oneshot::channel();
     
-    tokio::spawn(async move {
+    let signal_task = tokio::spawn(async move {
         #[cfg(unix)]
         let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(s) => s,
@@ -180,7 +180,7 @@ pub async fn run_agent(
         }
     });
 
-    match run_task.await {
+    let result = match run_task.await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -200,5 +200,10 @@ pub async fn run_agent(
             
             Ok(("".to_string(), format!("ERROR: Agent execution timed out after {} seconds.", timeout_secs), false))
         }
-    }
+    };
+    
+    // Abort the detached signal task to prevent memory/task leak over multiple epochs
+    signal_task.abort();
+    
+    result
 }

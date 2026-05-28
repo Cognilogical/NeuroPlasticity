@@ -52,8 +52,10 @@ pub async fn ask_llm(
             env_var == "TOGETHER_API_KEY";
             
         if !is_valid_env_var {
-            let re = regex::Regex::new(r"^[A-Z][A-Z0-9_]*_(API_KEY|TOKEN)$").unwrap();
-            let is_safe_pattern = re.is_match(env_var) 
+            static API_KEY_REGEX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+                regex::Regex::new(r"^[A-Z][A-Z0-9_]*_(API_KEY|TOKEN)$").unwrap()
+            });
+            let is_safe_pattern = API_KEY_REGEX.is_match(env_var) 
                 && !env_var.contains("SECRET") 
                 && !env_var.contains("PRIVATE") 
                 && !env_var.contains("AWS")
