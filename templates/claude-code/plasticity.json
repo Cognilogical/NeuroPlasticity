@@ -35,7 +35,7 @@
   "evaluators": [
     {
       "name": "Verify JSON Output",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
+      "script": ["jq", ".", "/workspace/summary.json"],
       "weight": 1.0
     }
   ]

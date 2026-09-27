@@ -85,7 +85,7 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
     {
       "name": "Strict JSON Check (Local Shell)",
       "type": "host_bash",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! Did you use markdown blocks?' >&2; exit 1)"],
+      "script": ["jq", ".", "/workspace/summary.json"],
       "weight": 1.0
     },
     {
@@ -176,18 +176,23 @@ The Meta-Optimizer must find a system prompt that satisfies *all* evaluators sim
 "evaluators": [
   {
     "name": "Check JSON Format",
-    "script": ["bash", "-c", "jq . output.json || (echo 'Must be valid JSON!' >&2; exit 1)"],
-    "weight": 0.5
-  },
-  {
-    "name": "Check For Markdown Code Blocks",
-    "script": ["bash", "-c", "! grep -q '```' output.json || (echo 'No markdown code blocks allowed!' >&2; exit 1)"],
+    "script": ["jq", ".", "output.json"],
     "weight": 0.5
   },
   {
     "name": "Check Schema",
-    "script": ["bash", "-c", "jq -e '.status == \"success\"' output.json || (echo 'Missing status field!' >&2; exit 1)"],
+    "script": ["jq", "-e", ".status == \"success\"", "output.json"],
     "weight": 1.0
+  },
+  {
+    "name": "Check For Markdown Code Blocks",
+    "type": "container",
+    "image": "alpine:latest",
+    "setup_script": ["apk add --no-cache grep"],
+    "command": ["sh", "-c", "grep -q '```' /workspace/output.json && echo 'No markdown code blocks allowed!' >&2 && exit 1 || exit 0"],
+    "weight": 0.5
   }
 ]
 ```
+
+**Important — `host_bash` runs on your host machine.** Its first argument must be one of `git`, `jq`, `cat`, `ls`, `grep`, or `echo`; anything else is rejected as a sandbox-escape attempt. That includes `bash -c`, which would let a manifest run arbitrary commands on your machine, so shell logic cannot be used there even though it looks more convenient. Write the command as a direct argument list and let the exit code be the signal — the tool's own stderr is captured and handed to the Meta-Optimizer, so failure messages stay informative (e.g. `jq: error: Could not open file ...`). Note that `grep -q pattern file` exits **zero when it finds a match**, so for a "must not contain" check you need the negation that only a shell can express: use a `container` evaluator, which is properly sandboxed.

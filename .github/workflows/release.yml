@@ -24,7 +24,11 @@ jobs:
             target: aarch64-apple-darwin
             artifact_name: NeuroPlasticity
             asset_name: neuroplasticity-macos-aarch64
-          - os: macos-13
+          # NOTE: macos-13 was retired by GitHub in Dec 2025. Leaving it in the
+          # matrix strands the whole run in "queued" until it is auto-cancelled
+          # after 24h, which is what silently killed the v1.0.1 and v1.0.2
+          # releases. Build both macOS architectures from an arm64 host.
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: NeuroPlasticity
             asset_name: neuroplasticity-macos-x86_64

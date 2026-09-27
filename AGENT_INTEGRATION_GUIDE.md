@@ -65,7 +65,7 @@ If the agent is installed globally via npm (e.g., `@anthropic-ai/claude-code`), 
     {
       "name": "Verify JSON Output",
       "type": "host_bash",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || exit 1"],
+      "script": ["jq", ".", "/workspace/summary.json"],
       "weight": 1.0
     }
   ]
@@ -122,7 +122,7 @@ If the agent is a pre-compiled native binary located in the host's home director
     {
       "name": "Verify JSON Output",
       "type": "host_bash",
-      "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON!' >&2; exit 1)"],
+      "script": ["jq", ".", "/workspace/summary.json"],
       "weight": 1.0
     }
   ]
@@ -163,7 +163,7 @@ When all tests in the waterfall pass on Epoch 1, the accumulated `neuroplasticit
 2. **Pick a base image that matches the agent's Node requirement.** `node:20-slim` is right for most CLIs, but some (e.g. `@github/copilot`) require Node 22+. An `npm install -g` that cannot resolve its engine constraint fails at setup time with a confusing error.
 3. **The `mounts` array (Zero-Config Auth):** Map the user's host config directory into the container's `/user_home/` directory. **CRITICAL WARNING FOR SQLITE:** If your agent relies on a local SQLite database for state (like `~/.local/share/opencode`), you MUST mount it with `"readonly": false`. If you mount an SQLite database as read-only, the agent will crash trying to acquire a WAL (Write-Ahead Log) lock.
 3. **The `evaluators` array:** You must define your tests. NeuroPlasticity supports three `type`s of evaluators:
-   - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure. Only `git`, `jq`, `cat`, `ls`, `grep`, and `echo` are allowed; anything else must go through a `container` evaluator.
+   - `host_bash`: Fast local tests that run directly on the **host** machine. Must exit 0 for success, non-zero for failure. Because it is not sandboxed, the first argument must be one of `git`, `jq`, `cat`, `ls`, `grep`, or `echo`; `bash -c` and anything else are rejected as sandbox-escape attempts. Use a direct argument list and rely on the exit code — the tool's stderr is captured for the optimizer. Remember `grep -q PATTERN FILE` exits **zero when it finds a match**, so "must not contain" checks need a `container` evaluator.
    - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.
    - `llm`: Prompt-based grading using the configured Meta-Optimizer LLM (`optimization.meta_llm`). Requires a `target_file` and `prompt`. Returns a structured `{"verdict": "PASS"|"FAIL", "reason": "..."}` object, so write the `prompt` as a grading criterion and let the framework handle the output contract. If the model endpoint is unreachable, the run **aborts** rather than recording a failure — that is deliberate, so infrastructure problems are never mistaken for your mistakes.
    If a test fails, you must return a clear error (e.g., `echo` to stderr or fail the LLM prompt). The Meta-Optimizer reads this failure to learn what you did wrong. Evaluators are run entirely **asynchronously in parallel**, so execution is extremely fast regardless of how many tests you write.
