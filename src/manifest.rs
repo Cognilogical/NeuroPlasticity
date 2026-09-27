@@ -71,10 +71,20 @@ pub struct MetaLlmConfig {
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
     pub model_path: Option<String>,
+    /// Sampling temperature. Defaults to 0.0 (deterministic grading) when omitted.
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// Max tokens to generate. Defaults to 1024 when omitted.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Wire protocol for the `custom` provider: `chat_completions` (default)
+    /// or `responses`. Inferred from a `/responses` `base_url` when omitted.
+    #[serde(default)]
+    pub api_style: Option<String>,
 }
 
 fn default_provider() -> String {
-    "github".to_string()
+    "embedded".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

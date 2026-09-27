@@ -1,8 +1,8 @@
+use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
-use sha2::{Sha256, Digest};
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct FingerprintCache {
@@ -25,21 +25,35 @@ pub fn calculate_fingerprint(
     agent_command: &[String],
     target_rules_file: &PathBuf,
     manifest_name: &str,
+    meta_provider: &str,
     meta_model: &str,
+    meta_base_url: &str,
     evaluators_serialized: &str,
 ) -> String {
     let mut hasher = Sha256::new();
-    
+
+    // Field boundaries are labelled: concatenating unlabelled values lets two
+    // different configs hash identically (provider "ab" + model "c" would
+    // otherwise collide with provider "a" + model "bc").
+    let mut field = |label: &str, value: &str| {
+        hasher.update(format!("|{}={}|", label.len(), label).as_bytes());
+        hasher.update(value.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(value.as_bytes());
+    };
+
     // Hash the command
-    for part in agent_command {
-        hasher.update(part.as_bytes());
-    }
-    
+    field("agent_command", &agent_command.join("\u{0}"));
+
     // Hash the manifest configuration
-    hasher.update(manifest_name.as_bytes());
-    hasher.update(meta_model.as_bytes());
-    hasher.update(evaluators_serialized.as_bytes());
-    
+    field("name", manifest_name);
+    field("provider", meta_provider);
+    field("model", meta_model);
+    // The same model name can resolve to different backends, and a cached
+    // failure from one backend must not be replayed against another.
+    field("base_url", meta_base_url);
+    field("evaluators", evaluators_serialized);
+
     // Hash the current rules state
     if target_rules_file.exists() {
         if let Ok(content) = std::fs::read_to_string(target_rules_file) {
@@ -55,7 +69,7 @@ pub fn calculate_fingerprint(
             }
         }
     }
-    
+
     // Return hex string of the SHA256 hash
     let result = hasher.finalize();
     hex::encode(result)
@@ -86,9 +100,9 @@ pub fn save_fingerprint(fingerprint: &str, failure: CachedFailure) -> Result<()>
     };
 
     cache.failures.insert(fingerprint.to_string(), failure);
-    
+
     let updated_json = serde_json::to_string_pretty(&cache)?;
     fs::write(path, updated_json)?;
-    
+
     Ok(())
 }

@@ -3,18 +3,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub mod reporter;
 pub mod container;
-pub mod evaluator;
-pub mod manifest;
-pub mod optimizer;
-pub mod runner;
-pub mod llm_client;
-pub mod fingerprint;
 #[cfg(feature = "embedded-llm")]
 pub mod embedded_llm;
+pub mod evaluator;
+pub mod fingerprint;
+pub mod llm_client;
+pub mod manifest;
+pub mod optimizer;
+pub mod reporter;
+pub mod runner;
 
-async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifest::PlasticityManifest)> {
+async fn run_single_manifest(
+    manifest_path: &Path,
+) -> Result<(bool, u32, manifest::PlasticityManifest)> {
     let manifest_content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read {:?}", manifest_path))?;
     let manifest: manifest::PlasticityManifest = serde_json::from_str(&manifest_content)
@@ -32,8 +34,14 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
     let target_rules_file = PathBuf::from(&manifest.optimization.target_rules_file);
 
     // Prevent Path Traversal (P0 Fix)
-    if target_rules_file.is_absolute() || target_rules_file.components().any(|c| c.as_os_str() == "..") {
-        anyhow::bail!("Security Exception: target_rules_file must be a safe, relative path inside the project directory.");
+    if target_rules_file.is_absolute()
+        || target_rules_file
+            .components()
+            .any(|c| c.as_os_str() == "..")
+    {
+        anyhow::bail!(
+            "Security Exception: target_rules_file must be a safe, relative path inside the project directory."
+        );
     }
 
     for epoch in 1..=max_epochs {
@@ -42,27 +50,37 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
         // Calculate run fingerprint
         let evaluators_json = serde_json::to_string(&manifest.evaluators).unwrap_or_default();
         let fingerprint = fingerprint::calculate_fingerprint(
-            agent_command, 
-            &target_rules_file, 
+            agent_command,
+            &target_rules_file,
             &manifest.name,
+            &manifest.optimization.meta_llm.provider,
             &manifest.optimization.meta_llm.model,
-            &evaluators_json
+            manifest
+                .optimization
+                .meta_llm
+                .base_url
+                .as_deref()
+                .unwrap_or_default(),
+            &evaluators_json,
         );
-        
-        let mut stdout: String;
+
+        // Declared before the fast-path branch below: either the cache supplies
+        // these values or the sandbox run does.
+        let stdout: String;
         let stderr: String;
         let score: f64;
         let pass: bool;
-        let threshold: f64;
-        
+
         if let Some(cached_failure) = fingerprint::check_fingerprint(&fingerprint) {
-            println!("⚡ FAST PATH: Known failure fingerprint ({}) detected for this exact rule configuration.", fingerprint);
+            println!(
+                "⚡ FAST PATH: Known failure fingerprint ({}) detected for this exact rule configuration.",
+                fingerprint
+            );
             println!("Skipping 120s container execution and loading cached side-effects...");
             stdout = cached_failure.stdout;
             stderr = cached_failure.stderr;
             score = cached_failure.score;
             pass = false; // We only cache failures
-            threshold = pass_threshold;
         } else {
             // 2. Isolate: Setup scratch workspace
             println!("Setting up ephemeral workspace...");
@@ -77,7 +95,9 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
                 scratch_path,
                 &manifest.sandbox,
                 agent_command,
-            ).await.context("Failed to run agent in container sandbox")?;
+            )
+            .await
+            .context("Failed to run agent in container sandbox")?;
 
             stdout = sandbox_stdout;
             stderr = sandbox_stderr;
@@ -92,37 +112,50 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
                 pass_threshold,
                 &manifest.sandbox,
                 &manifest.optimization.meta_llm,
-            ).await.context("Evaluator execution failed")?;
+            )
+            .await
+            .context("Evaluator execution failed")?;
 
             score = eval_result.score;
             pass = eval_result.pass;
-            threshold = eval_result.threshold;
 
-            println!("Score: {:.2} (Threshold: {:.2})", score, threshold);
+            println!(
+                "Score: {:.2} (Threshold: {:.2})",
+                score, eval_result.threshold
+            );
 
-            // 5. Observe & Report
-            println!("Generating epoch report...");
-            let reporter = reporter::Reporter::new();
-            reporter.report_epoch(
+            // If it failed, save to fingerprint cache so we never run this exact configuration again
+            if !pass {
+                let _ = fingerprint::save_fingerprint(
+                    &fingerprint,
+                    fingerprint::CachedFailure {
+                        score,
+                        stdout: stdout.clone(),
+                        stderr: stderr.clone(),
+                    },
+                );
+            }
+
+            println!("Cleaning up ephemeral workspace...");
+        }
+
+        // 5. Observe & Report
+        //
+        // Emitted for the fast path as well as a fresh run: a cached epoch must
+        // still leave a report artifact, otherwise the run produces logs but no
+        // evidence of what was scored.
+        println!("Generating epoch report...");
+        let reporter = reporter::Reporter::new();
+        reporter
+            .report_epoch(
                 &run_id,
                 epoch as u32,
                 &stdout,
                 &stderr,
                 score,
                 vec![], // We'll add mutations here if applicable
-            ).context("Failed to write epoch report")?;
-
-            // If it failed, save to fingerprint cache so we never run this exact configuration again
-            if !pass {
-                let _ = fingerprint::save_fingerprint(&fingerprint, fingerprint::CachedFailure {
-                    score,
-                    stdout: stdout.clone(),
-                    stderr: stderr.clone(),
-                });
-            }
-            
-            println!("Cleaning up ephemeral workspace...");
-        }
+            )
+            .context("Failed to write epoch report")?;
 
         if pass {
             println!("✅ Epoch {} achieved passing score! Run complete.", epoch);
@@ -132,7 +165,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
         // 7. Optimize & Mutate
         if epoch < max_epochs {
             println!("❌ Score below threshold. Invoking Meta-Optimizer...");
-            
+
             // Read existing rules to pass to the optimizer as context
             let existing_rules: Vec<String> = if target_rules_file.exists() {
                 if let Ok(content) = fs::read_to_string(&target_rules_file) {
@@ -143,24 +176,30 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<(bool, u32, manifes
             } else {
                 Vec::new()
             };
-            
+
             let new_rule = optimizer::run_llm_optimizer(
                 &manifest.optimization.meta_llm,
                 &stderr,
                 &manifest.task_prompt,
                 &existing_rules,
-            ).await?;
-            
+            )
+            .await
+            .with_context(|| {
+                "The Meta-Optimizer could not produce a usable new rule. The agent is not \
+                 necessarily still at fault — verify the meta_llm endpoint and key before \
+                 trusting any further optimization."
+            })?;
+
             // Append the generated rule to rules.json
             if let Some(parent) = target_rules_file.parent() {
                 fs::create_dir_all(parent)?;
             }
-            
+
             let mut rules_to_save = existing_rules.clone();
             rules_to_save.push(new_rule.clone());
             let updated_json = serde_json::to_string_pretty(&rules_to_save)?;
             fs::write(&target_rules_file, updated_json)?;
-            
+
             println!("Applied new rule optimization to {:?}", target_rules_file);
         } else {
             println!("❌ Max epochs reached without achieving pass threshold.");
@@ -177,7 +216,7 @@ async fn main() -> Result<()> {
     // 1. Parse & Validate Manifest
     let mut args = std::env::args();
     args.next(); // Skip executable name
-    
+
     let mut manifest_path_str = "plasticity.json".to_string();
     while let Some(arg) = args.next() {
         if arg == "test" {
@@ -188,12 +227,12 @@ async fn main() -> Result<()> {
             manifest_path_str = arg;
         }
     }
-    
+
     let manifest_path = Path::new(&manifest_path_str);
     if !manifest_path.exists() {
         anyhow::bail!("Path {:?} not found.", manifest_path);
     }
-    
+
     let mut queue = Vec::new();
     if manifest_path.is_dir() {
         for entry in fs::read_dir(manifest_path)? {
@@ -204,7 +243,9 @@ async fn main() -> Result<()> {
             }
         }
         // Run via natural sort so 10-test.json comes AFTER 2-test.json (Issue #7)
-        queue.sort_by(|a, b| natord::compare(a.to_string_lossy().as_ref(), b.to_string_lossy().as_ref()));
+        queue.sort_by(|a, b| {
+            natord::compare(a.to_string_lossy().as_ref(), b.to_string_lossy().as_ref())
+        });
     } else {
         queue.push(manifest_path.to_path_buf());
     }
@@ -213,17 +254,23 @@ async fn main() -> Result<()> {
         anyhow::bail!("No JSON manifests found in {:?}", manifest_path);
     }
 
-    println!("Detected {} test manifest(s). Commencing execution...", queue.len());
+    println!(
+        "Detected {} test manifest(s). Commencing execution...",
+        queue.len()
+    );
 
     let mut final_manifest: Option<manifest::PlasticityManifest> = None;
 
     let mut waterfall_restarts = 0;
     let max_restarts = queue.len() * 3; // Prevent infinite loops
-    
+
     // The Adversarial Waterfall Loop
     'waterfall: loop {
         if waterfall_restarts > max_restarts {
-            println!("⚠️ Waterfall Loop Cap Reached ({} restarts). Aborting to prevent infinite loops.", max_restarts);
+            println!(
+                "⚠️ Waterfall Loop Cap Reached ({} restarts). Aborting to prevent infinite loops.",
+                max_restarts
+            );
             break 'waterfall;
         }
         let mut rules_mutated = false;
@@ -232,27 +279,39 @@ async fn main() -> Result<()> {
             println!("\n=======================================================");
             println!("▶ Executing Manifest: {:?}", m);
             println!("=======================================================");
-            
+
             let (passed, epochs_taken, manifest) = run_single_manifest(m).await?;
             final_manifest = Some(manifest);
 
             if !passed {
-                println!("\n⚠️  Manifest {:?} failed to pass even after {} epochs.", m, epochs_taken);
-                println!("   Halting the Waterfall here, but preserving the rules accumulated so far.");
-                println!("   These rules are quantifiably better than the baseline, even if they couldn't fully domesticate this specific model.");
+                println!(
+                    "\n⚠️  Manifest {:?} failed to pass even after {} epochs.",
+                    m, epochs_taken
+                );
+                println!(
+                    "   Halting the Waterfall here, but preserving the rules accumulated so far."
+                );
+                println!(
+                    "   These rules are quantifiably better than the baseline, even if they couldn't fully domesticate this specific model."
+                );
                 break 'waterfall;
             }
 
             if epochs_taken > 1 {
                 rules_mutated = true;
                 waterfall_restarts += 1;
-                println!("\n🔄 Rules were mutated by {:?}. Restarting Waterfall from the top to ensure backward compatibility...", m);
+                println!(
+                    "\n🔄 Rules were mutated by {:?}. Restarting Waterfall from the top to ensure backward compatibility...",
+                    m
+                );
                 break; // Break the inner loop to restart the waterfall
             }
         }
 
         if !rules_mutated {
-            println!("\n🌊 Waterfall Complete! All models passed on Epoch 1. No further rule mutations were needed.");
+            println!(
+                "\n🌊 Waterfall Complete! All models passed on Epoch 1. No further rule mutations were needed."
+            );
             break 'waterfall;
         }
     }
@@ -264,19 +323,22 @@ async fn main() -> Result<()> {
             if let Ok(content) = fs::read_to_string(target_rules_file) {
                 if let Ok(rules) = serde_json::from_str::<Vec<String>>(&content) {
                     if !rules.is_empty() {
-                        let mut patch_doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
+                        let mut patch_doc =
+                            String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
                         patch_doc.push_str(&format!("**Target Project:** `{}`\n", manifest.name));
                         patch_doc.push_str("**Status:** ✅ Verified against deterministic evaluators across the entire Waterfall.\n\n");
                         patch_doc.push_str("The following behavioral constraints successfully corrected the agent's failure paths. You should permanently inject these into the target agent's system prompt or `AGENTS.md`:\n\n");
-                        
+
                         for (i, rule) in rules.iter().enumerate() {
                             patch_doc.push_str(&format!("### Rule {}\n> {}\n\n", i + 1, rule));
                         }
-                        
+
                         let patch_path = Path::new("neuroplasticity_patch.md");
                         if fs::write(patch_path, patch_doc).is_ok() {
                             println!("\n📄 Improvement patch generated at {:?}", patch_path);
-                            println!("   Provide this patch file to your primary agent to permanently implement the fix.");
+                            println!(
+                                "   Provide this patch file to your primary agent to permanently implement the fix."
+                            );
                         }
                     }
                 }
