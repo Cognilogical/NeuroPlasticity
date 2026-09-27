@@ -1,12 +1,29 @@
-use crate::manifest::{Evaluator, EvaluatorType, Sandbox, MetaLlmConfig};
-use crate::llm_client::ask_llm;
+use crate::llm_client::{CompletionSpec, ask_llm_json};
+use crate::manifest::{Evaluator, EvaluatorType, MetaLlmConfig, Sandbox};
 use anyhow::Result;
-use std::path::Path;
-use tokio::process::Command;
 use futures::future::join_all;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::sync::Semaphore;
+
+/// JSON Schema for an LLM evaluator's verdict.
+fn verdict_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["PASS", "FAIL"],
+                "description": "PASS only if the document satisfies the evaluation prompt."
+            },
+            "reason": { "type": "string", "description": "One sentence explaining the verdict." }
+        },
+        "required": ["verdict", "reason"],
+        "additionalProperties": false
+    })
+}
 
 #[derive(Debug)]
 pub struct EvaluatorScore {
@@ -41,9 +58,14 @@ pub async fn evaluate(
     let is_embedded = meta_llm.provider == "embedded";
     let llm_concurrency = if is_embedded { 1 } else { 10 };
     let llm_semaphore = Arc::new(Semaphore::new(llm_concurrency));
-    
+
     // Prevent host CPU/RAM exhaustion from spawning 30+ containers concurrently
     let system_semaphore = Arc::new(Semaphore::new(8));
+
+    // Infrastructure failures (bad key, dead endpoint, unusable verdict) must
+    // abort the run instead of being scored as agent failures — otherwise the
+    // optimizer "fixes" an agent that was never broken.
+    let infra_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn each evaluator into an asynchronous task so they execute in parallel
     for eval in evaluators {
@@ -53,11 +75,15 @@ pub async fn evaluate(
         let meta_llm_clone = meta_llm.clone();
         let llm_sem_clone = Arc::clone(&llm_semaphore);
         let sys_sem_clone = Arc::clone(&system_semaphore);
+        let infra_errors_clone = Arc::clone(&infra_errors);
 
         let handle = tokio::spawn(async move {
             let (success, output) = match eval_clone.r#type {
                 EvaluatorType::HostBash => {
-                    let _permit = sys_sem_clone.acquire().await.expect("Failed to acquire system semaphore");
+                    let _permit = sys_sem_clone
+                        .acquire()
+                        .await
+                        .expect("Failed to acquire system semaphore");
                     if let Some(script) = &eval_clone.script {
                         if script.is_empty() {
                             (false, Some("Empty host_bash script array".to_string()))
@@ -65,25 +91,33 @@ pub async fn evaluate(
                             // Issue #4: Prevent Sandbox Escape
                             let cmd_name = &script[0];
                             let safe_commands = ["git", "jq", "cat", "ls", "grep", "echo"];
-                            let is_safe = safe_commands.contains(&cmd_name.as_str()) || 
-                                          (cmd_name.starts_with('/') && safe_commands.iter().any(|c| cmd_name.ends_with(&format!("/{}", c))));
-                            
+                            let is_safe = safe_commands.contains(&cmd_name.as_str())
+                                || (cmd_name.starts_with('/')
+                                    && safe_commands
+                                        .iter()
+                                        .any(|c| cmd_name.ends_with(&format!("/{}", c))));
+
                             if !is_safe {
                                 return EvaluatorScore {
                                     name: eval_clone.name.clone(),
                                     success: false,
                                     weight: eval_clone.weight,
-                                    output: Some(format!("Security Exception: host_bash command '{}' is not in the system allowlist. Evaluators must use container environment for arbitrary execution.", cmd_name))
+                                    output: Some(format!(
+                                        "Security Exception: host_bash command '{}' is not in the system allowlist. Evaluators must use container environment for arbitrary execution.",
+                                        cmd_name
+                                    )),
                                 };
                             }
-                            
+
                             // Prevent relative path execution like "./malicious.sh"
                             if cmd_name.contains('.') || cmd_name.contains("..") {
                                 return EvaluatorScore {
                                     name: eval_clone.name.clone(),
                                     success: false,
                                     weight: eval_clone.weight,
-                                    output: Some(format!("Security Exception: host_bash command cannot be a relative file execution."))
+                                    output: Some(format!(
+                                        "Security Exception: host_bash command cannot be a relative file execution."
+                                    )),
                                 };
                             }
 
@@ -92,8 +126,10 @@ pub async fn evaluate(
                                 cmd.args(&script[1..]);
                             }
                             cmd.current_dir(&working_dir_clone);
-                            
-                            let timeout_dur = Duration::from_secs(sandbox_clone.timeout_seconds.unwrap_or(60) as u64);
+
+                            let timeout_dur = Duration::from_secs(
+                                sandbox_clone.timeout_seconds.unwrap_or(60) as u64,
+                            );
                             match tokio::time::timeout(timeout_dur, cmd.output()).await {
                                 Ok(Ok(out)) => {
                                     let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
@@ -103,30 +139,49 @@ pub async fn evaluate(
                                     println!("Evaluator '{}' output: {}", eval_clone.name, msg);
                                     (out.status.success(), Some(msg))
                                 }
-                                Ok(Err(e)) => (false, Some(format!("Failed to execute host_bash command: {}", e))),
-                                Err(_) => (false, Some(format!("Evaluator timed out after {}s", timeout_dur.as_secs()))),
+                                Ok(Err(e)) => (
+                                    false,
+                                    Some(format!("Failed to execute host_bash command: {}", e)),
+                                ),
+                                Err(_) => (
+                                    false,
+                                    Some(format!(
+                                        "Evaluator timed out after {}s",
+                                        timeout_dur.as_secs()
+                                    )),
+                                ),
                             }
                         }
                     } else {
-                        (false, Some("Missing 'script' for host_bash evaluator".to_string()))
+                        (
+                            false,
+                            Some("Missing 'script' for host_bash evaluator".to_string()),
+                        )
                     }
-                },
+                }
                 EvaluatorType::Container => {
-                    let _permit = sys_sem_clone.acquire().await.expect("Failed to acquire system semaphore");
+                    let _permit = sys_sem_clone
+                        .acquire()
+                        .await
+                        .expect("Failed to acquire system semaphore");
                     if let (Some(image), Some(command)) = (&eval_clone.image, &eval_clone.command) {
                         let preferred_engine = Some(sandbox_clone.engine.clone());
-                        let (engine, is_podman) = match crate::container::detect_container_engine(&preferred_engine).await {
+                        let (engine, is_podman) = match crate::container::detect_container_engine(
+                            &preferred_engine,
+                        )
+                        .await
+                        {
                             Ok(res) => res,
                             Err(e) => {
                                 return EvaluatorScore {
                                     name: eval_clone.name.clone(),
                                     success: false,
                                     weight: eval_clone.weight,
-                                    output: Some(format!("Container engine error: {}", e))
+                                    output: Some(format!("Container engine error: {}", e)),
                                 };
                             }
                         };
-                            
+
                         let mut cmd = Command::new(&engine);
                         cmd.arg("run");
                         cmd.arg("--rm");
@@ -135,24 +190,37 @@ pub async fn evaluate(
                         }
                         cmd.arg("--security-opt");
                         cmd.arg("no-new-privileges");
-                        
-                        let scratch_mount = sandbox_clone.workspace.as_ref().map_or("/workspace", |w| &w.scratch_mount);
+
+                        let scratch_mount = sandbox_clone
+                            .workspace
+                            .as_ref()
+                            .map_or("/workspace", |w| &w.scratch_mount);
                         cmd.arg("-v");
-                        cmd.arg(&format!("{}:{}:ro,Z", working_dir_clone.display(), scratch_mount));
+                        cmd.arg(&format!(
+                            "{}:{}:ro,Z",
+                            working_dir_clone.display(),
+                            scratch_mount
+                        ));
                         cmd.arg("--workdir");
                         cmd.arg(scratch_mount);
-                        
+
                         cmd.arg(image);
-                        
+
                         if let Some(setup) = &eval_clone.setup_script {
                             if !setup.is_empty() {
                                 let joined_script = setup.join(" && ");
-                                let quoted_cmd: Vec<String> = command.iter().map(|s| {
-                                    if s.contains(' ') || s.contains('"') || s.contains('\'') {
-                                        format!("'{}'", s.replace('\'', "'\\''"))
-                                    } else { s.clone() }
-                                }).collect();
-                                let full_command = format!("{} && {}", joined_script, quoted_cmd.join(" "));
+                                let quoted_cmd: Vec<String> = command
+                                    .iter()
+                                    .map(|s| {
+                                        if s.contains(' ') || s.contains('"') || s.contains('\'') {
+                                            format!("'{}'", s.replace('\'', "'\\''"))
+                                        } else {
+                                            s.clone()
+                                        }
+                                    })
+                                    .collect();
+                                let full_command =
+                                    format!("{} && {}", joined_script, quoted_cmd.join(" "));
                                 cmd.arg("sh");
                                 cmd.arg("-c");
                                 cmd.arg(&full_command);
@@ -163,7 +231,8 @@ pub async fn evaluate(
                             cmd.args(command);
                         }
 
-                        let timeout_dur = Duration::from_secs(sandbox_clone.timeout_seconds.unwrap_or(60) as u64);
+                        let timeout_dur =
+                            Duration::from_secs(sandbox_clone.timeout_seconds.unwrap_or(60) as u64);
                         match tokio::time::timeout(timeout_dur, cmd.output()).await {
                             Ok(Ok(out)) => {
                                 let mut msg = String::from_utf8_lossy(&out.stderr).to_string();
@@ -173,43 +242,126 @@ pub async fn evaluate(
                                 println!("Evaluator '{}' output: {}", eval_clone.name, msg);
                                 (out.status.success(), Some(msg))
                             }
-                            Ok(Err(e)) => (false, Some(format!("Failed to run container evaluator: {}", e))),
-                            Err(_) => (false, Some(format!("Evaluator timed out after {}s", timeout_dur.as_secs()))),
+                            Ok(Err(e)) => (
+                                false,
+                                Some(format!("Failed to run container evaluator: {}", e)),
+                            ),
+                            Err(_) => (
+                                false,
+                                Some(format!(
+                                    "Evaluator timed out after {}s",
+                                    timeout_dur.as_secs()
+                                )),
+                            ),
                         }
                     } else {
-                        (false, Some("Missing 'image' or 'command' for container evaluator".to_string()))
+                        (
+                            false,
+                            Some(
+                                "Missing 'image' or 'command' for container evaluator".to_string(),
+                            ),
+                        )
                     }
-                },
+                }
                 EvaluatorType::Llm => {
-                    let _permit = llm_sem_clone.acquire().await.expect("Failed to acquire LLM semaphore");
-                    
-                    if let (Some(prompt), Some(target_file)) = (&eval_clone.prompt, &eval_clone.target_file) {
+                    let _permit = llm_sem_clone
+                        .acquire()
+                        .await
+                        .expect("Failed to acquire LLM semaphore");
+
+                    if let (Some(prompt), Some(target_file)) =
+                        (&eval_clone.prompt, &eval_clone.target_file)
+                    {
                         let file_path = working_dir_clone.join(target_file);
                         if file_path.exists() {
                             if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
-                                let system_prompt = "You are an automated evaluator. Grade the user's document based on the provided prompt. Reply with exactly 'PASS' or 'FAIL' followed by a brief reason.";
-                                let user_prompt = format!("Evaluation Prompt:\n{}\n\nTarget Document ({}):\n{}", prompt, target_file, content);
-                                
-                                match ask_llm(&meta_llm_clone, system_prompt, &user_prompt).await {
-                                    Ok(response) => {
-                                        println!("LLM Evaluator '{}' Response: {}", eval_clone.name, response);
-                                        let success = response.trim().starts_with("PASS");
-                                        (success, Some(response))
-                                    },
-                                    Err(e) => (false, Some(format!("LLM Error: {}", e)))
+                                let system_prompt = concat!(
+                                    "You are an automated evaluator. Grade the document against the prompt.\n",
+                                    "Reply with a single JSON object: {\"verdict\": \"PASS\"|\"FAIL\", ",
+                                    "\"reason\": \"<one sentence>\"} and nothing else."
+                                );
+                                let user_prompt = format!(
+                                    "Evaluation Prompt:\n{}\n\nTarget Document ({}):\n{}",
+                                    prompt, target_file, content
+                                );
+
+                                let spec = CompletionSpec {
+                                    system_prompt,
+                                    user_prompt: &user_prompt,
+                                    json_schema: Some(verdict_schema()),
+                                };
+
+                                match ask_llm_json(&meta_llm_clone, &spec).await {
+                                    Ok(value) => {
+                                        let verdict = value
+                                            .get("verdict")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .trim()
+                                            .to_uppercase();
+                                        let reason = value
+                                            .get("reason")
+                                            .and_then(|r| r.as_str())
+                                            .unwrap_or_default()
+                                            .trim();
+
+                                        if verdict != "PASS" && verdict != "FAIL" {
+                                            infra_errors_clone.lock().unwrap().push(format!(
+                                                "LLM evaluator '{}' returned an unusable verdict ({:?})",
+                                                eval_clone.name, verdict
+                                            ));
+                                            (
+                                                false,
+                                                Some(format!(
+                                                    "Unusable LLM verdict: {:?}",
+                                                    verdict
+                                                )),
+                                            )
+                                        } else {
+                                            let success = verdict == "PASS";
+                                            let report = if reason.is_empty() {
+                                                verdict.clone()
+                                            } else {
+                                                format!("{} — {}", verdict, reason)
+                                            };
+                                            println!(
+                                                "LLM Evaluator '{}' Verdict: {}",
+                                                eval_clone.name, report
+                                            );
+                                            (success, Some(report))
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // An unreachable endpoint or expired key is not an
+                                        // agent failure; record it so the run aborts.
+                                        infra_errors_clone.lock().unwrap().push(format!(
+                                            "LLM evaluator '{}': {}",
+                                            eval_clone.name, e
+                                        ));
+                                        (false, Some(format!("LLM Error: {}", e)))
+                                    }
                                 }
                             } else {
-                                (false, Some(format!("Failed to read target file: {}", target_file)))
+                                (
+                                    false,
+                                    Some(format!("Failed to read target file: {}", target_file)),
+                                )
                             }
                         } else {
-                            (false, Some(format!("Target file does not exist: {}", target_file)))
+                            (
+                                false,
+                                Some(format!("Target file does not exist: {}", target_file)),
+                            )
                         }
                     } else {
-                        (false, Some("Missing 'prompt' or 'target_file' for llm evaluator".to_string()))
+                        (
+                            false,
+                            Some("Missing 'prompt' or 'target_file' for llm evaluator".to_string()),
+                        )
                     }
                 }
             };
-            
+
             EvaluatorScore {
                 name: eval_clone.name,
                 success,
@@ -223,6 +375,14 @@ pub async fn evaluate(
 
     // Await all evaluators in parallel
     let results = join_all(futures).await;
+
+    let infra = infra_errors.lock().unwrap().clone();
+    if !infra.is_empty() {
+        anyhow::bail!(
+            "Evaluator infrastructure failed — this is not an agent failure, so the run is aborted: {}",
+            infra.join("; ")
+        );
+    }
 
     let mut total_weight = 0.0;
     let mut passing_weight = 0.0;
