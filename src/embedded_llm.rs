@@ -1,15 +1,14 @@
 use anyhow::{Context, Result};
-use std::path::{PathBuf};
-use std::fs;
-use std::num::NonZero;
-use tokio::io::AsyncWriteExt;
-use serde::{Deserialize, Serialize};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::model::AddBos;
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::num::NonZero;
+use std::path::PathBuf;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AcceptableModel {
@@ -38,19 +37,21 @@ fn get_acceptable_models() -> Result<Vec<AcceptableModel>> {
         }
     }
 
-    // Default list if file doesn't exist or is empty
+    // Default list if file doesn't exist or is empty.
+    // Kept current with the architectures supported by the vendored llama.cpp
+    // (QWEN3 / QWEN35); sized for ~16GB RAM CPU-only inference.
     let default_models = vec![
+        AcceptableModel {
+            filename: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf".to_string(),
+        },
+        AcceptableModel {
+            filename: "Qwen3.5-9B-Q4_K_M.gguf".to_string(),
+            download_url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf".to_string(),
+        },
         AcceptableModel {
             filename: "qwen2.5-coder-7b-instruct-q4_k_m.gguf".to_string(),
             download_url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf".to_string(),
-        },
-        AcceptableModel {
-            filename: "Meta-Llama-3-8B-Instruct-Q4_K_M.gguf".to_string(),
-            download_url: "https://huggingface.co/QuantFactory/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf".to_string(),
-        },
-        AcceptableModel {
-            filename: "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf".to_string(),
-            download_url: "https://huggingface.co/bartowski/Mistral-Nemo-Instruct-2407-GGUF/resolve/main/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf".to_string(),
         }
     ];
 
@@ -62,11 +63,10 @@ fn get_acceptable_models() -> Result<Vec<AcceptableModel>> {
     Ok(default_models)
 }
 
-
 fn find_model_in_caches(filename: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let home_path = PathBuf::from(home);
-    
+
     let cache_dirs = vec![
         home_path.join(".cache/huggingface/hub"),
         home_path.join(".ollama/models/blobs"),
@@ -75,10 +75,16 @@ fn find_model_in_caches(filename: &str) -> Option<PathBuf> {
     ];
 
     for dir in cache_dirs {
-        if !dir.exists() { continue; }
-        
+        if !dir.exists() {
+            continue;
+        }
+
         // Recursively search for the filename, following symlinks (common in huggingface cache)
-        for entry in walkdir::WalkDir::new(&dir).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if entry.file_type().is_file() {
                 if let Some(name) = entry.file_name().to_str() {
                     if name == filename {
@@ -92,7 +98,6 @@ fn find_model_in_caches(filename: &str) -> Option<PathBuf> {
 }
 
 async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf> {
-
     // 1. If the user explicitly provided a path in plasticity.json, respect it.
     if let Some(path_str) = model_path {
         let path = PathBuf::from(path_str);
@@ -130,25 +135,33 @@ async fn ensure_model_downloaded(model_path: Option<&String>) -> Result<PathBuf>
     println!("Downloading {}...", default_model.filename);
     println!("This will take a few minutes but only happens once.");
 
-    let response = reqwest::get(&default_model.download_url).await.context("Failed to download model")?;
-    
+    let response = reqwest::get(&default_model.download_url)
+        .await
+        .context("Failed to download model")?;
+
     if !response.status().is_success() {
         anyhow::bail!("Failed to download model: HTTP {}", response.status());
     }
 
-    let mut file = tokio::fs::File::create(&temp_path).await.context("Failed to create temporary model file")?;
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .context("Failed to create temporary model file")?;
     let mut stream = response.bytes_stream();
-    
+
     use futures_util::StreamExt;
-    
+
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("Error reading streaming model download")?;
-        file.write_all(&chunk).await.context("Failed to write to model file")?;
+        file.write_all(&chunk)
+            .await
+            .context("Failed to write to model file")?;
     }
-    
+
     // Rename temp file to final target path atomically upon completion to prevent cache pollution
-    tokio::fs::rename(&temp_path, &target_path).await.context("Failed to finalize downloaded model file")?;
-    
+    tokio::fs::rename(&temp_path, &target_path)
+        .await
+        .context("Failed to finalize downloaded model file")?;
+
     println!("Model downloaded successfully.");
 
     Ok(target_path)
@@ -160,59 +173,82 @@ pub async fn run_embedded_llm(
     model_path: Option<&String>,
 ) -> Result<String> {
     let actual_model_path = ensure_model_downloaded(model_path).await?;
-    
-    println!("Initializing local llama.cpp engine with {:?}", actual_model_path);
-    
+
+    println!(
+        "Initializing local llama.cpp engine with {:?}",
+        actual_model_path
+    );
+
     let backend = LlamaBackend::init().context("Failed to initialize llama backend")?;
     let model_params = LlamaModelParams::default();
-    
+
     let model = LlamaModel::load_from_file(&backend, &actual_model_path, &model_params)
         .context("Failed to load model from file")?;
 
     let mut ctx_params = LlamaContextParams::default();
     ctx_params = ctx_params.with_n_ctx(Some(NonZero::new(8192).unwrap())); // Provide a decent context window for logs
-    
-    let mut ctx = model.new_context(&backend, ctx_params)
+
+    let mut ctx = model
+        .new_context(&backend, ctx_params)
         .context("Failed to create llama context")?;
 
-    // Quick prompt template (ChatML / Qwen format)
-    let full_prompt = format!("<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", system_prompt, user_prompt);
-    
-    let tokens = model.str_to_token(&full_prompt, AddBos::Always)
+    // Use the chat template embedded in the GGUF. A hardcoded ChatML prompt is
+    // silently wrong for every non-Qwen model (Llama, Gemma, Qwen3.5...), which
+    // made switching embedded models unusable.
+    let chat = vec![
+        LlamaChatMessage::new("system".to_string(), system_prompt.to_string())
+            .context("Failed to create system chat message")?,
+        LlamaChatMessage::new("user".to_string(), user_prompt.to_string())
+            .context("Failed to create user chat message")?,
+    ];
+
+    let full_prompt = match model.chat_template(None) {
+        Ok(template) => model
+            .apply_chat_template(&template, &chat, true)
+            .context("Failed to apply the model's chat template")?,
+        // Model ships no template: fall back to ChatML (Qwen-style).
+        Err(_) => format!(
+            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            system_prompt, user_prompt
+        ),
+    };
+
+    let tokens = model
+        .str_to_token(&full_prompt, AddBos::Always)
         .context("Failed to tokenize prompt")?;
-        
+
     let mut batch = LlamaBatch::new(8192, 1);
-    
+
     let last_index = tokens.len() - 1;
     for (i, &token) in tokens.iter().enumerate() {
         let is_last = i == last_index;
         batch.add(token, i as i32, &[0], is_last)?;
     }
-    
+
     ctx.decode(&mut batch).context("llama.cpp decode failed")?;
-    
+
     let mut generated_text = String::new();
     let mut n_cur = batch.n_tokens();
     let n_len = 1024; // max generated tokens
-    
+
     while n_cur < batch.n_tokens() + n_len {
         let candidates_iter = ctx.candidates();
         let mut best_id: Option<llama_cpp_2::token::LlamaToken> = None;
         let mut best_logit = f32::NEG_INFINITY;
-        
+
         for candidate in candidates_iter {
             if candidate.logit() > best_logit {
                 best_logit = candidate.logit();
                 best_id = Some(candidate.id());
             }
         }
-        
+
         let new_token_id = best_id.unwrap_or_else(|| model.token_eos());
-        
+
         if new_token_id == model.token_eos() {
             break;
         }
-        
+
         // Use token_to_piece_bytes correctly
         // pub fn token_to_piece_bytes(
         //    &self,
@@ -221,17 +257,49 @@ pub async fn run_embedded_llm(
         //    special: bool,
         //    lstrip: Option<NonZero<u16>>
         // ) -> Result<Vec<u8>, TokenToStringError>
-        
+
         if let Ok(piece) = model.token_to_piece_bytes(new_token_id, 32, false, None) {
             let token_str = String::from_utf8_lossy(&piece).to_string();
             generated_text.push_str(&token_str);
         }
-        
+
         batch.clear();
         batch.add(new_token_id, n_cur, &[0], true)?;
         ctx.decode(&mut batch)?;
         n_cur += 1;
     }
-    
+
     Ok(generated_text.trim().to_string())
+}
+
+/// Real end-to-end smoke test: loads an actual GGUF and generates through the
+/// GGUF-embedded chat template. Run with:
+///   cargo test --features embedded-llm -- --ignored
+#[tokio::test]
+#[ignore = "loads a multi-GB GGUF; heavy"]
+async fn embedded_model_generates_through_gguf_template() {
+    // Prefer a cached model; falls back to the download logic otherwise.
+    let cached = std::env::var("NP_TEST_GGUF").unwrap_or_else(|_| {
+        format!(
+            "{}/.cache/neuro/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+            std::env::var("HOME").expect("HOME not set")
+        )
+    });
+    let path = std::path::PathBuf::from(&cached);
+    assert!(path.exists(), "test model not found at {}", cached);
+
+    let out = run_embedded_llm(
+        "You are an automated evaluator. Reply with exactly PASS or FAIL followed by a brief reason.",
+        "Grade this output: The file contains {\"status\": \"success\"} with no markdown fences. Evaluation prompt: it must be valid JSON.",
+        Some(&cached),
+    )
+    .await
+    .expect("embedded LLM failed");
+
+    println!("Embedded model replied: {}", out);
+    assert!(
+        out.to_uppercase().starts_with("PASS"),
+        "unexpected reply: {}",
+        out
+    );
 }

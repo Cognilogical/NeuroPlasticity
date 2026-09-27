@@ -2,14 +2,14 @@
   "name": "copilot-cli-self-evaluation",
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
-    "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && github-copilot-cli 'Analyze /project and save to /workspace/summary.json'"
+    "bash", "-c",
+    "cat .neuroplasticity/rules.json > rules.txt && copilot -p \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\" -s --no-ask-user --allow-all-tools"
   ],
   "sandbox": {
     "engine": "podman",
-    "base_image": "node:20-slim",
+    "base_image": "node:22-slim",
     "setup_script": [
-      "npm install -g @githubnext/github-copilot-cli"
+      "npm install -g @github/copilot"
     ],
     "workspace": {
       "project_mount": "/project",
@@ -17,8 +17,8 @@
     },
     "mounts": [
       {
-        "source": "~/.config/github-copilot",
-        "target": "/root/.config/github-copilot",
+        "source": "~/.copilot",
+        "target": "/root/.copilot",
         "readonly": true
       }
     ]
@@ -35,6 +35,7 @@
   "evaluators": [
     {
       "name": "Verify JSON Output",
+      "type": "host_bash",
       "script": ["bash", "-c", "jq . /workspace/summary.json || (echo 'Output is not valid JSON! DO NOT use markdown blocks!' >&2; exit 1)"],
       "weight": 1.0
     }

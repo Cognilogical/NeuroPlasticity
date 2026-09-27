@@ -120,11 +120,10 @@
             "provider": {
               "type": "string",
               "enum": [
-                "github",
                 "custom",
                 "embedded"
               ],
-              "description": "The LLM API provider. Defaults to 'github' to use Copilot Models API. Set to 'embedded' to use llama.cpp locally."
+              "description": "The LLM API provider. Defaults to 'embedded' for offline llama.cpp inference. Use 'custom' for any OpenAI-compatible endpoint (set base_url and api_key_env). The former 'github' provider was retired with GitHub Models on 2026-07-30."
             },
             "model": {
               "type": "string",
@@ -133,6 +132,22 @@
             "model_path": {
               "type": "string",
               "description": "Optional local path to a .gguf file for the 'embedded' provider. If omitted, defaults to downloading a 4-bit Qwen model."
+            },
+            "temperature": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2,
+              "description": "Sampling temperature. Defaults to 0.0 so grading is deterministic. Providers that reject a temperature (reasoning models) are handled automatically."
+            },
+            "max_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum tokens to generate. Defaults to 1024."
+            },
+            "api_style": {
+              "type": "string",
+              "enum": ["chat_completions", "responses"],
+              "description": "Wire protocol for the 'custom' provider. Defaults to 'chat_completions', or is inferred from a base_url ending in /responses."
             },
             "base_url": {
               "type": "string",

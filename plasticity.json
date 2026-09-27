@@ -3,7 +3,7 @@
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && CLAUDE_NON_INTERACTIVE=1 claude-code --prompt-file rules.txt 'Analyze /project and save to /workspace/summary.json'"
+    "cat .neuroplasticity/rules.json > rules.txt && claude -p --append-system-prompt-file rules.txt --dangerously-skip-permissions 'Analyze /project and save to /workspace/summary.json'"
   ],
   "sandbox": {
     "engine": "podman",

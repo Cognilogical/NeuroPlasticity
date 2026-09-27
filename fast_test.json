@@ -12,8 +12,8 @@
     "epochs": 1,
     "pass_threshold": 1.0,
     "meta_llm": {
-      "provider": "dummy",
-      "model": "dummy"
+      "provider": "embedded",
+      "model": "qwen-local"
     }
   },
   "evaluators": [

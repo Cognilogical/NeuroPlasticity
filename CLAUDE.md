@@ -52,18 +52,38 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+# Build with the embedded offline LLM engine (required for provider "embedded")
+cargo build --release --features embedded-llm
+
+# Unit tests — no network, no model download
+cargo test --features embedded-llm
+
+# Ignored integration tests: real GGUF load + live endpoint round-trips
+cargo test --release --features embedded-llm -- --ignored
+#   NP_TEST_BASE_URL=<openai-compatible endpoint> NP_TEST_API_KEY_ENV=<KEY_ENV_VAR> \
+#     cargo test --release --features embedded-llm custom_endpoint_round_trip -- --ignored
 ```
+
+Without `--features embedded-llm`, builds are faster but a manifest using `provider: "embedded"` fails at runtime with a clear message.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full walkthrough. Key points:
+
+- `src/main.rs` — CLI entry, the epoch/waterfall loop, and the final patch writer.
+- `src/runner.rs` — Podman/Docker sandbox execution, the hybrid `/project` (ro) + `/workspace` (rw) workspace, and the ephemeral `/user_home`.
+- `src/evaluator.rs` — Tri-State Evaluators, run concurrently under a semaphore. LLM verdicts are JSON Schema output; infrastructure errors abort the run.
+- `src/optimizer.rs` — Meta-Optimizer. Returns a structured `{"rule": ...}` that is sanitized, length-capped, and de-duplicated before being persisted.
+- `src/llm_client.rs` — the single request path for `custom` providers: deadline, retries, provider-error surfacing, and both `chat/completions` and `responses` wire formats.
+- `src/embedded_llm.rs` — local `llama.cpp` inference, GGUF discovery/caching, and per-model chat templates.
+- `src/fingerprint.rs` — failure-only cache keyed on the full test configuration.
+
+Model configuration lives in exactly one place: `optimization.meta_llm` in `plasticity.json`. See [README.md](README.md#using-a-hosted-model-instead-eg-opencode-zen).
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **Fail loud.** Never convert an API error into plausible-looking model output; a swallowed error becomes a grader verdict and then a cached "known failure."
+- **Determinism by default.** `temperature` defaults to `0.0`; grading must not flap between runs.
+- **Treat generated rules as code.** They are injected into an agent prompt forever, so validate before persisting.
+- **Platform-agnostic code paths.** Model paths use `shellexpand`/forward slashes; keep runtime branching on `cfg(target_os)` rather than OS checks.

@@ -7,6 +7,8 @@ A **`plasticity.json`** manifest (to define the sandbox, the task, and the evalu
 
 **We use a "Zero-Dockerfile" approach.** You do not need to write a Dockerfile. Instead, use a standard base image (e.g. `node:20-slim` or `python:3.12-slim`) and the `setup_script` array to install yourself JIT (Just-In-Time).
 
+**Before you write the manifest, confirm two things about the current CLI you are testing against:** the exact npm package or binary name, and the flags for non-interactive/headless use. These move fast and the old invocations fail confusingly rather than loudly. Prefer the agent's own `--append-system-prompt-file` (or equivalent) over splicing the rules into a prompt string with shell substitution, so the rules arrive as a system-level constraint rather than as part of the task.
+
 Follow these exact architectural rules.
 
 ---
@@ -30,7 +32,7 @@ If the agent is installed globally via npm (e.g., `@anthropic-ai/claude-code`), 
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && claude -p \"$(cat rules.txt)\n\nAnalyze /project and save to /workspace/summary.json\""
+    "cat .neuroplasticity/rules.json > rules.txt 2>/dev/null || true && claude -p --append-system-prompt-file rules.txt --dangerously-skip-permissions 'Analyze /project and save to /workspace/summary.json'"
   ],
   "sandbox": {
     "engine": "podman",
@@ -128,7 +130,7 @@ If the agent is a pre-compiled native binary located in the host's home director
 ```
 
 ## 🛡️ 3. Adversarial Stress Testing (The Waterfall)
-Not all LLMs follow rules equally. Reasoning models (like `o3-mini`) stubbornly ignore formatting rules, while fast models (like `gpt-5-mini` or `claude-haiku`) frequently forget negative constraints. 
+Not all LLMs follow rules equally. Reasoning models (`deepseek-r1`, the `*-thinking` family) tend to ignore formatting rules, while fast models (`gpt-5-mini`, `claude-haiku`, the `*-flash` family) frequently forget negative constraints. Use the model names actually present in the user's list.
 
 If you want to mathematically prove your prompt is indestructible, **do not hardcode a single model or write monolithic bash scripts.** Instead, build an **Adversarial Waterfall**.
 
@@ -136,7 +138,7 @@ If you want to mathematically prove your prompt is indestructible, **do not hard
 When the user asks you to set up tests, you must discover what models are available on their specific machine, categorize them, and generate a sequence of JSON test files.
 
 **Step 1: Discovery**
-Use your own CLI tool (e.g., `opencode models`, `gh copilot models`, or `claude config`) via your host terminal to pull the user's available model list.
+Use your own CLI tool via your host terminal to pull the user's available model list. Check whichever agents are actually installed (e.g. `opencode models`, or a provider's own `/models` command). Do not assume a model list from a vendor that is no longer installed or whose service has been retired — a stale list produces tests that can never pass.
 
 **Step 2: Categorization**
 Search the list you just pulled and identify the worst offenders in these three Archetypes:
@@ -158,15 +160,17 @@ When all tests in the waterfall pass on Epoch 1, the accumulated `neuroplasticit
 
 ### 🧠 Critical Directives for Agents:
 1. **Choose Your Installation Strategy:** If you are an NPM package, use **Strategy A**. If you are a native pre-compiled binary, use **Strategy B**. NEVER mix the two (do not mount a host binary into a `node:20-slim` container, and do not try to run `npm install -g opencode`).
-2. **The `mounts` array (Zero-Config Auth):** Map the user's host config directory into the container's `/user_home/` directory. **CRITICAL WARNING FOR SQLITE:** If your agent relies on a local SQLite database for state (like `~/.local/share/opencode`), you MUST mount it with `"readonly": false`. If you mount an SQLite database as read-only, the agent will crash trying to acquire a WAL (Write-Ahead Log) lock.
+2. **Pick a base image that matches the agent's Node requirement.** `node:20-slim` is right for most CLIs, but some (e.g. `@github/copilot`) require Node 22+. An `npm install -g` that cannot resolve its engine constraint fails at setup time with a confusing error.
+3. **The `mounts` array (Zero-Config Auth):** Map the user's host config directory into the container's `/user_home/` directory. **CRITICAL WARNING FOR SQLITE:** If your agent relies on a local SQLite database for state (like `~/.local/share/opencode`), you MUST mount it with `"readonly": false`. If you mount an SQLite database as read-only, the agent will crash trying to acquire a WAL (Write-Ahead Log) lock.
 3. **The `evaluators` array:** You must define your tests. NeuroPlasticity supports three `type`s of evaluators:
-   - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure.
+   - `host_bash`: Fast local shell tests using the `script` array. Must exit 0 for success, 1 for failure. Only `git`, `jq`, `cat`, `ls`, `grep`, and `echo` are allowed; anything else must go through a `container` evaluator.
    - `container`: Isolated test containers using `image`, `setup_script`, and `command` arrays.
-   - `llm`: Prompt-based grading using the embedded LLM. Requires a `target_file` and `prompt`.
+   - `llm`: Prompt-based grading using the configured Meta-Optimizer LLM (`optimization.meta_llm`). Requires a `target_file` and `prompt`. Returns a structured `{"verdict": "PASS"|"FAIL", "reason": "..."}` object, so write the `prompt` as a grading criterion and let the framework handle the output contract. If the model endpoint is unreachable, the run **aborts** rather than recording a failure — that is deliberate, so infrastructure problems are never mistaken for your mistakes.
    If a test fails, you must return a clear error (e.g., `echo` to stderr or fail the LLM prompt). The Meta-Optimizer reads this failure to learn what you did wrong. Evaluators are run entirely **asynchronously in parallel**, so execution is extremely fast regardless of how many tests you write.
-4. **Timeouts & Safety:** By default, NeuroPlasticity kills the sandbox container if your agent takes longer than 120 seconds to execute. If you are testing a slow reasoning model, you can override this by adding `"timeout_seconds": 300` to the `sandbox` block.
-5. **The Fast-Path Cache:** NeuroPlasticity hashes your test configuration (command, model, active rules). If you run a test that previously failed with the exact same rules, the orchestrator will instantly skip the 120s execution and reload the cached failure logs. Don't be surprised if your test returns in 0.1 seconds!
-6. **The Feedback Loop & The Patch:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, try to read this file and inject it into your prompt so you learn from your mistakes in Epoch 2! Once you successfully pass an epoch (or exhaust the epochs), NeuroPlasticity will output a final `neuroplasticity_patch.md` in the root directory. You should read this file and permanently add those successful rules to your own system prompt or the repository's `AGENTS.md`.
+4. **Choosing the Meta-Optimizer model** (`optimization.meta_llm`): `"provider": "embedded"` is the default and needs no API key (a 4-bit Qwen3 model is downloaded once). To use a hosted model instead, set `"provider": "custom"` with `base_url` and `api_key_env` — the key must be exported in the shell that runs the CLI. Both `chat/completions` and `responses` endpoints are supported; set `api_style` if the URL does not make the protocol obvious. Grading quality depends heavily on this choice: a weak grader produces confidently wrong verdicts, which is worse than no LLM evaluator at all.
+5. **Timeouts & Safety:** By default, NeuroPlasticity kills the sandbox container if your agent takes longer than 120 seconds to execute. If you are testing a slow reasoning model, you can override this by adding `"timeout_seconds": 300` to the `sandbox` block.
+6. **The Fast-Path Cache:** NeuroPlasticity hashes your test configuration (command, model, provider, endpoint, active rules). If you run a test that previously failed with the exact same rules, the orchestrator will instantly skip the 120s execution and reload the cached failure logs. Don't be surprised if your test returns in 0.1 seconds! Because this caches *failures*, changing the model or endpoint also invalidates the cache — which is correct, since a different backend is a different grader.
+7. **The Feedback Loop & The Patch:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, read this file and inject it into your prompt so you learn from your mistakes in Epoch 2! Rules are validated before they are written: `Rule:` prefixes and markdown fences are stripped, rules longer than 400 characters are rejected, and a rule that repeats an existing one aborts the run. Once you successfully pass an epoch (or exhaust the epochs), NeuroPlasticity will output a final `neuroplasticity_patch.md` in the root directory. You should read this file and permanently add those successful rules to your own system prompt or the repository's `AGENTS.md`.
 
 **Your Next Step:**
 Acknowledge these instructions to the user, assess the specific task the user wants you to optimize yourself for, and generate the `plasticity.json` in their repository.

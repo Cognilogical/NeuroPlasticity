@@ -24,12 +24,14 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Hybrid Workspace (Zero-Copy):** Agents execute inside secure, rootless **Podman** containers. The host project is mounted as Read-Only (`/project:ro`) to guarantee safety, while the agent works in an ephemeral Read-Write scratch directory (`/workspace:rw`), eliminating slow deep-copies.
 *   **Zero-Dockerfile JIT Setup:** No need to build custom, bloated container images. NeuroPlasticity uses standard base images (like `node:20-slim` or `python:3.12-slim`) and installs your agent Just-In-Time using a `setup_script` array in your manifest.
 *   **Zero-Config Auth:** Mount host credential directories (e.g., `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`) as read-only to bypass complex OAuth flows in ephemeral sandboxes.
-*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run models like `Qwen2.5-Coder` directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
+*   **Fail Loud, Never Silent:** API errors are surfaced with their status and body instead of being coerced into plausible-looking model output. An LLM evaluator that cannot be reached aborts the run rather than recording a failure the agent never caused.
+*   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run a 4-bit `Qwen3` model directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads; the candidate list is editable at `~/.config/NeuroPlasticity/models.json`. Prompts are assembled with the chat template embedded in each GGUF, so non-Qwen models are not silently mis-prompted. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
+*   **Release binaries include the offline engine:** The published artifacts are built with `--features embedded-llm`, and CI asserts the engine is actually present before uploading. Builds without that flag compile successfully but abort at runtime on `provider: "embedded"`, so the check is enforced rather than documented.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
 *   **Tri-State Evaluators:** Evaluate your agents exactly how you need:
     1. `host_bash`: Fast, lightweight POSIX shell commands running locally.
     2. `container`: Isolated evaluation containers for heavy dependencies (Node.js, `pytest`, etc.) without host pollution.
-    3. `llm`: Embedded `llama.cpp` prompt-based grading for nuanced checks (tone, style) returning PASS/FAIL.
+    3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted.
 
 ## ⚡ How It Works
 
@@ -50,7 +52,7 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
   "task_prompt": "Read the config files in /project and output a summary to /workspace/summary.json",
   "agent_command": [
     "bash", "-c", 
-    "cat .neuroplasticity/rules.json > rules.txt && CLAUDE_NON_INTERACTIVE=1 claude-code --prompt-file rules.txt 'Analyze /project and save to /workspace/summary.json'"
+    "cat .neuroplasticity/rules.json > rules.txt && claude -p --append-system-prompt-file rules.txt --dangerously-skip-permissions 'Analyze /project and save to /workspace/summary.json'"
   ],
   "sandbox": {
     "engine": "podman",
@@ -106,7 +108,7 @@ We use a "Zero-Dockerfile" approach. You don't need to build images; just tell t
 ```
 
 **2. Run the CLI tool (with embedded local inference):**
-No API keys required for the Meta-Optimizer. If you downloaded the pre-compiled binary from our releases page, it already includes the embedded `llama.cpp` engine. It will automatically download a fast 4-bit `Qwen2.5` model to your local cache.
+No API keys required for the Meta-Optimizer. If you downloaded the pre-compiled binary from our releases page, it already includes the embedded `llama.cpp` engine. It will automatically download a fast 4-bit `Qwen3` model to your local cache.
 ```bash
 ./neuroplasticity-linux-x86_64
 # Or on Mac: ./neuroplasticity-macos-aarch64
@@ -114,8 +116,48 @@ No API keys required for the Meta-Optimizer. If you downloaded the pre-compiled 
 
 *(If you are compiling from source, use `cargo run --release --features embedded-llm`)*
 
+### Using a hosted model instead (e.g. OpenCode Zen)
+
+`optimization.meta_llm` is the only place the model API is configured. Set `provider` to `custom` and point `base_url` at any OpenAI-compatible `/chat/completions` endpoint:
+
+```json
+"meta_llm": {
+  "provider": "custom",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://opencode.ai/zen/v1/chat/completions",
+  "api_key_env": "OPENCODE_API_KEY"
+}
+```
+
+Then export the key in the shell that runs the CLI:
+
+```bash
+export OPENCODE_API_KEY=your-key
+```
+
+Notes:
+- This client speaks both `chat/completions` and `responses`. On OpenCode Zen that covers `deepseek-*`, `glm-*`, `kimi-*`, `minimax-*`, `qwen3.8-*` and the `*-free` models on `chat/completions`, plus the `gpt-*` family on `responses`. To use a `gpt-*` model, point `base_url` at the responses endpoint and it is detected automatically:
+
+```json
+"meta_llm": {
+  "provider": "custom",
+  "model": "gpt-5.5",
+  "base_url": "https://opencode.ai/zen/v1/responses",
+  "api_key_env": "OPENCODE_API_KEY"
+}
+```
+
+  Set `api_style` to `"chat_completions"` or `"responses"` explicitly to override the inference. The `claude-*` (`/v1/messages`) and `jev-*` (`/v1/systemone`) families use different protocols and are not supported.
+- Grader verdicts and optimizer rules are requested as JSON Schema. Providers that reject `response_format` (or `text.format`) are detected from the 400 response and the constraint is dropped automatically, falling back to a prompt-only contract.
+- An LLM evaluator that cannot be reached (bad key, dead endpoint) aborts the run instead of counting as an agent failure. A framework that penalizes the agent for its own infrastructure problems produces meaningless rules.
+- `temperature` defaults to `0.0` for reproducible grading. Providers that reject it are detected from the 400 response and the field is dropped automatically, so reasoning models work too.
+- Changing `provider`, `model`, or `base_url` invalidates the failure-fingerprint cache, so a new backend never replays another backend's cached verdicts.
+- To test an endpoint without a real key, use the ignored round-trip test:
+  `NP_TEST_BASE_URL=https://opencode.ai/zen/v1/chat/completions NP_TEST_API_KEY_ENV=OPENCODE_API_KEY cargo test --release --features embedded-llm -- --ignored custom_endpoint`
+
+
 ### What Happens:
-*   **Epoch 1:** NeuroPlasticity mounts your host project as Read-Only (`/project`), installs `claude-code` JIT, and runs it. The agent writes the file, but includes markdown backticks. `jq` fails with a parse error.
+*   **Epoch 1:** NeuroPlasticity mounts your host project as Read-Only (`/project`), installs the agent JIT, and runs it. The agent writes the file, but includes markdown backticks. `jq` fails with a parse error.
 *   **The Meta-Optimizer:** Your local embedded LLM reads the `jq` failure log. It autonomously writes a new system rule: *"CRITICAL: When outputting JSON to a file, DO NOT wrap the output in markdown code blocks (\`\`\`json). You must output raw JSON text only."* It saves this to `.neuroplasticity/rules.json`.
 *   **Epoch 2:** The agent runs again. Because the `agent_command` injects `.neuroplasticity/rules.json` into Claude's prompt, it now knows exactly what to avoid. It outputs raw JSON. The `jq` evaluator passes!
 *   **The Patch:** NeuroPlasticity outputs `neuroplasticity_patch.md`. You simply copy that mathematically verified rule and paste it permanently into your agent instructions.
