@@ -112,7 +112,19 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "The weighted score ratio required to stop the loop successfully."
+          "description": "The weighted score ratio required to stop the loop successfully. Run-level: the score is passing_weight / total_weight across all evaluators, so a passing run can still hide an individual failing evaluator."
+        },
+        "regression_guard": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "string",
+              "enum": ["annotate", "block"],
+              "description": "What to do when a proposed rule fixes one evaluator by breaking another that passed at baseline. 'annotate' (default) reports the regression in the patch and marks it REGRESSED; 'block' withholds the patch entirely."
+            }
+          },
+          "description": "Optional. Omit for 'annotate', which matches pre-existing behavior.",
+          "additionalProperties": false
         },
         "meta_llm": {
           "type": "object",

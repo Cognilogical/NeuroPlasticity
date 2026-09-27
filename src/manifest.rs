@@ -55,12 +55,43 @@ fn default_readonly() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RegressionPolicy {
+    /// Report the regression and mark the patch REGRESSED, but still emit it.
+    /// Preserves throughput; the consumer is warned.
+    #[default]
+    Annotate,
+    /// Refuse to emit rules that regress a previously-passing evaluator.
+    Block,
+}
+
+/// What to do when a rule that fixed one evaluator broke another (F1).
+///
+/// Defaults to `annotate` for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionGuard {
+    #[serde(default)]
+    pub policy: RegressionPolicy,
+}
+
+impl Default for RegressionGuard {
+    fn default() -> Self {
+        Self {
+            policy: RegressionPolicy::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Optimization {
     pub target_rules_file: String,
     pub epochs: u32,
     pub pass_threshold: f64,
     pub meta_llm: MetaLlmConfig,
+    /// Optional. Absent means `annotate`, which matches pre-existing behavior.
+    #[serde(default)]
+    pub regression_guard: Option<RegressionGuard>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

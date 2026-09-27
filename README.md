@@ -167,7 +167,49 @@ Notes:
 ### 1. Baking in Heavy Dependencies (MCP Servers)
 If your agent relies on heavy external tools like `sqlite`, a Python environment, or an MCP (Model Context Protocol) server, the JIT `setup_script` might be too slow. In this case, build a custom `Containerfile` or `Dockerfile` and point your `plasticity.json` to that image instead.
 
-### 2. Chained Evaluators & Preventing Regressions
+### 3. Patch Honesty & the Regression Guard
+
+`pass_threshold` is a **run-level** scalar: the score is `passing_weight / total_weight` across all evaluators, so a passing run can still hide an individually failing evaluator. NeuroPlasticity captures a per-evaluator baseline on the first evaluated epoch, before any rule is mutated, and diffs against it afterwards.
+
+Any evaluator that passed at baseline and fails now is a **regression** — a rule that fixed something by breaking something else. Regressions are announced on stdout, listed in the patch, and surfaced in a delta table:
+
+```
+| evaluator             | baseline | final | delta        |
+|-----------------------|----------|-------|--------------|
+| `jq: schema valid`    | PASS     | PASS  | —            |
+| `llm: tone is warm`   | FAIL     | PASS  | improved     |
+| `host_bash: no secrets` | PASS   | FAIL  | **REGRESSION** |
+```
+
+The patch header is derived from the actual outcome, never assumed:
+
+| Outcome | Status line | "permanently inject" advice | Exit code |
+|---|---|---|---|
+| All evaluators passed | `✅ Verified…` | yes | 0 |
+| A manifest exhausted its epochs | `⚠️ PARTIAL — … UNVERIFIED` | **no** | 2 |
+| An evaluator regressed | `⚠️ REGRESSED — …` | **no** | 2 |
+
+A non-clean run no longer prints "You should permanently inject these into your system prompt" — advice the run has not earned. The warning lives in the artifact, not just stdout, since the artifact is what gets handed to another agent. Each patch also carries a machine-readable block so a consumer can filter without parsing prose:
+
+```markdown
+<!-- neuroplasticity:status
+outcome: regressed
+rules_verified: false
+regressed_evaluator: host_bash: no secrets
+-->
+```
+
+To refuse the patch entirely when a regression appears, set the guard to `block`:
+
+```json
+"optimization": {
+  "regression_guard": { "policy": "block" }
+}
+```
+
+Omitting `regression_guard` keeps the default `annotate` behavior: report the regression, mark the patch, still emit it.
+
+### 4. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

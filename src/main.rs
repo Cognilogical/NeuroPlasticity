@@ -11,12 +11,22 @@ pub mod fingerprint;
 pub mod llm_client;
 pub mod manifest;
 pub mod optimizer;
+pub mod patch;
 pub mod reporter;
 pub mod runner;
 
-async fn run_single_manifest(
-    manifest_path: &Path,
-) -> Result<(bool, u32, manifest::PlasticityManifest)> {
+/// Result of running one manifest: pass/fail, epochs used, and the per-evaluator
+/// outcomes needed for a baseline diff.
+struct ManifestRun {
+    passed: bool,
+    epochs_taken: u32,
+    manifest: manifest::PlasticityManifest,
+    report: patch::ManifestReport,
+    /// True when the policy is `block` and a regression was detected.
+    blocked_by_regression: bool,
+}
+
+async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
     let manifest_content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read {:?}", manifest_path))?;
     let manifest: manifest::PlasticityManifest = serde_json::from_str(&manifest_content)
@@ -43,6 +53,11 @@ async fn run_single_manifest(
             "Security Exception: target_rules_file must be a safe, relative path inside the project directory."
         );
     }
+
+    // Baseline is captured on the first epoch that actually evaluates, before
+    // any rule has been mutated, and never re-captured.
+    let mut baseline: Option<Vec<patch::EvaluatorOutcome>> = None;
+    let mut final_results: Vec<patch::EvaluatorOutcome> = Vec::new();
 
     for epoch in 1..=max_epochs {
         println!("\n--- Epoch {} / {} ---", epoch, max_epochs);
@@ -119,6 +134,14 @@ async fn run_single_manifest(
             score = eval_result.score;
             pass = eval_result.pass;
 
+            // Record the baseline on the first evaluated epoch, and track the
+            // final result set for the delta diff (F1).
+            let outcomes = patch::EvaluatorOutcome::from_result(&eval_result);
+            if baseline.is_none() {
+                baseline = Some(outcomes.clone());
+            }
+            final_results = outcomes;
+
             println!(
                 "Score: {:.2} (Threshold: {:.2})",
                 score, eval_result.threshold
@@ -159,7 +182,19 @@ async fn run_single_manifest(
 
         if pass {
             println!("✅ Epoch {} achieved passing score! Run complete.", epoch);
-            return Ok((true, epoch as u32, manifest));
+            return Ok(ManifestRun {
+                passed: true,
+                epochs_taken: epoch as u32,
+                blocked_by_regression: false,
+                report: patch::ManifestReport {
+                    manifest_name: manifest.name.clone(),
+                    passed: true,
+                    epochs_taken: epoch as u32,
+                    baseline: baseline.clone().unwrap_or_default(),
+                    final_results,
+                },
+                manifest,
+            });
         }
 
         // 7. Optimize & Mutate
@@ -206,7 +241,38 @@ async fn run_single_manifest(
         }
     }
 
-    Ok((false, max_epochs as u32, manifest))
+    let baseline_outcomes = baseline.unwrap_or_default();
+    // `block` refuses to present a rule set that regressed something green.
+    let blocked_by_regression = manifest
+        .optimization
+        .regression_guard
+        .as_ref()
+        .map(|g| g.policy == manifest::RegressionPolicy::Block)
+        .unwrap_or(false)
+        && patch::ManifestReport {
+            manifest_name: manifest.name.clone(),
+            passed: false,
+            epochs_taken: max_epochs as u32,
+            baseline: baseline_outcomes.clone(),
+            final_results: final_results.clone(),
+        }
+        .regressions()
+        .len()
+            > 0;
+
+    Ok(ManifestRun {
+        passed: false,
+        epochs_taken: max_epochs as u32,
+        blocked_by_regression,
+        report: patch::ManifestReport {
+            manifest_name: manifest.name.clone(),
+            passed: false,
+            epochs_taken: max_epochs as u32,
+            baseline: baseline_outcomes,
+            final_results,
+        },
+        manifest,
+    })
 }
 
 #[tokio::main]
@@ -259,7 +325,16 @@ async fn main() -> Result<()> {
         queue.len()
     );
 
+    // Filled in as manifests run; the patch is written from it at the end.
     let mut final_manifest: Option<manifest::PlasticityManifest> = None;
+    let mut final_report: Option<patch::ManifestReport> = None;
+    // The real outcome of the Waterfall, which is what the patch is allowed to
+    // claim (F0). Derived, never assumed.
+    let mut any_regression: Option<patch::RunOutcome> = None;
+    let mut any_partial: Option<patch::RunOutcome> = None;
+    // Set when a manifest's regression_guard policy is `block` and a regression
+    // was seen: the patch is withheld entirely rather than annotated.
+    let mut blocked_patch = false;
 
     let mut waterfall_restarts = 0;
     let max_restarts = queue.len() * 3; // Prevent infinite loops
@@ -271,6 +346,10 @@ async fn main() -> Result<()> {
                 "⚠️ Waterfall Loop Cap Reached ({} restarts). Aborting to prevent infinite loops.",
                 max_restarts
             );
+            any_partial.get_or_insert(patch::RunOutcome::Partial {
+                manifest: "waterfall".to_string(),
+                epochs: 0,
+            });
             break 'waterfall;
         }
         let mut rules_mutated = false;
@@ -280,8 +359,51 @@ async fn main() -> Result<()> {
             println!("▶ Executing Manifest: {:?}", m);
             println!("=======================================================");
 
-            let (passed, epochs_taken, manifest) = run_single_manifest(m).await?;
-            final_manifest = Some(manifest);
+            let run = run_single_manifest(m).await?;
+            let passed = run.passed;
+            let epochs_taken = run.epochs_taken;
+            let report = run.report;
+            final_manifest = Some(run.manifest);
+
+            // Evaluate every regression-related fact before `report` is moved
+            // into `final_report`.
+            let manifest_name = report.manifest_name.clone();
+            let regressions: Vec<patch::EvaluatorOutcome> =
+                report.regressions().into_iter().cloned().collect();
+            let improvements: Vec<String> = report
+                .improvements()
+                .into_iter()
+                .map(|r| r.name.clone())
+                .collect();
+
+            if !regressions.is_empty() {
+                let names: Vec<String> = regressions.iter().map(|r| r.name.clone()).collect();
+                println!(
+                    "\n🚨 REGRESSION: {} evaluator(s) that passed at baseline now fail: {}",
+                    names.len(),
+                    names.join(", ")
+                );
+                for r in &regressions {
+                    println!("     - {}", r.name);
+                }
+                println!(
+                    "   A new rule fixed something by breaking this. The patch will be marked REGRESSED."
+                );
+                any_regression.get_or_insert(patch::RunOutcome::Regressed {
+                    manifest: manifest_name.clone(),
+                    evaluators: names,
+                });
+                if run.blocked_by_regression {
+                    blocked_patch = true;
+                    println!(
+                        "   🛑 regression_guard policy is `block`: the patch will be withheld."
+                    );
+                }
+            }
+            if !improvements.is_empty() {
+                println!("   ✨ Improved this epoch: {}", improvements.join(", "));
+            }
+            final_report = Some(report);
 
             if !passed {
                 println!(
@@ -291,9 +413,11 @@ async fn main() -> Result<()> {
                 println!(
                     "   Halting the Waterfall here, but preserving the rules accumulated so far."
                 );
-                println!(
-                    "   These rules are quantifiably better than the baseline, even if they couldn't fully domesticate this specific model."
-                );
+                println!("   These rules are UNVERIFIED — a proposal for review, not a fix.");
+                any_partial.get_or_insert(patch::RunOutcome::Partial {
+                    manifest: manifest_name.clone(),
+                    epochs: epochs_taken,
+                });
                 break 'waterfall;
             }
 
@@ -316,34 +440,66 @@ async fn main() -> Result<()> {
         }
     }
 
+    // A regression is the most severe outcome: it outranks a partial run.
+    let outcome = match (any_regression, any_partial) {
+        (Some(regression), _) => regression,
+        (None, Some(partial)) => partial,
+        (None, None) => patch::RunOutcome::Verified,
+    };
+
     // Write final patch
-    if let Some(manifest) = final_manifest {
+    if blocked_patch {
+        // `block` policy: emit nothing that could be mistaken for a fix. The
+        // rules stay on disk for inspection, but no patch artifact is produced.
+        if Path::new("neuroplasticity_patch.md").exists() {
+            let _ = std::fs::remove_file("neuroplasticity_patch.md");
+            println!(
+                "\n🛑 Removed neuroplasticity_patch.md: regression_guard policy is `block` and a \
+                 previously-passing evaluator regressed."
+            );
+        }
+    } else if let Some(manifest) = final_manifest {
         let target_rules_file = Path::new(&manifest.optimization.target_rules_file);
         if target_rules_file.exists() {
             if let Ok(content) = fs::read_to_string(target_rules_file) {
                 if let Ok(rules) = serde_json::from_str::<Vec<String>>(&content) {
                     if !rules.is_empty() {
-                        let mut patch_doc =
-                            String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
-                        patch_doc.push_str(&format!("**Target Project:** `{}`\n", manifest.name));
-                        patch_doc.push_str("**Status:** ✅ Verified against deterministic evaluators across the entire Waterfall.\n\n");
-                        patch_doc.push_str("The following behavioral constraints successfully corrected the agent's failure paths. You should permanently inject these into the target agent's system prompt or `AGENTS.md`:\n\n");
-
-                        for (i, rule) in rules.iter().enumerate() {
-                            patch_doc.push_str(&format!("### Rule {}\n> {}\n\n", i + 1, rule));
-                        }
+                        let patch_doc = patch::render_patch(
+                            &manifest.name,
+                            &outcome,
+                            final_report.as_ref(),
+                            &rules,
+                        );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");
                         if fs::write(patch_path, patch_doc).is_ok() {
                             println!("\n📄 Improvement patch generated at {:?}", patch_path);
+                            if !outcome.is_verified() {
+                                println!(
+                                    "   ⚠️  Status: {:?}. The rules are NOT verified — review before adopting.",
+                                    outcome
+                                );
+                            }
                             println!(
-                                "   Provide this patch file to your primary agent to permanently implement the fix."
+                                "   Provide this patch file to your primary agent to {}.",
+                                if outcome.is_verified() {
+                                    "permanently implement the fix."
+                                } else {
+                                    "review the unverified rules."
+                                }
                             );
                         }
                     }
                 }
             }
         }
+    }
+
+    // A run that ends with a regression is not a success (F1), so it must not
+    // report itself as one.
+    if !outcome.is_verified() {
+        println!("\n🛑 Run did not converge cleanly: {:?}", outcome);
+        std::process::exit(2);
     }
 
     Ok(())
