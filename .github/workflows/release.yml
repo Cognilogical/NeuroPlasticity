@@ -42,8 +42,37 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
 
+      - name: Ensure cmake is available
+        # Required to compile the vendored llama.cpp C++ sources for the
+        # embedded provider. Preinstalled on GitHub macOS images, but verify
+        # rather than assume: a release build that fails here ships nothing.
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              brew install cmake
+            else
+              sudo apt-get install -y cmake
+            fi
+          fi
+          cmake --version
+
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        # The `embedded-llm` feature is REQUIRED. Without it the binary compiles
+        # but every manifest using provider "embedded" aborts at runtime with
+        # "The 'embedded' provider requires the 'embedded-llm' feature".
+        # A quick sanity check on the produced binary follows the build.
+        run: cargo build --release --features embedded-llm --target ${{ matrix.target }}
+
+      - name: Verify embedded engine is present
+        run: |
+          BIN="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          # A binary built without the feature contains no llama.cpp symbols at
+          # all, so assert on the vendored loader symbol.
+          if ! strings "$BIN" | grep -q "llama_model_load_from_file"; then
+            echo "::error::embedded-llm feature missing from $BIN — the released binary would abort on provider: embedded"
+            exit 1
+          fi
+          echo "embedded engine verified in $BIN"
 
       - name: Rename binary for upload
         run: mv target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}

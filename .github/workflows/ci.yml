@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cmake
+        # Required by the vendored llama.cpp C++ sources behind `embedded-llm`.
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install cmake
+          else
+            sudo apt-get update && sudo apt-get install -y cmake build-essential
+          fi
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        run: cargo build --release --features embedded-llm
+
+      # Unit tests only: the ignored ones need network access and a multi-GB
+      # model download, so they stay manual (see CLAUDE.md).
+      - name: Test
+        run: cargo test --features embedded-llm
+
+      - name: Verify embedded engine is present
+        run: |
+          BIN="target/release/NeuroPlasticity"
+          if ! strings "$BIN" | grep -q "llama_model_load_from_file"; then
+            echo "::error::embedded-llm feature missing — binary would abort on provider: embedded"
+            exit 1
+          fi
