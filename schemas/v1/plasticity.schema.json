@@ -144,6 +144,16 @@
               "type": "string",
               "enum": ["halt", "warn"],
               "description": "What to do when a limit is reached. Defaults to 'halt'. A halted run is reported as not verified."
+            },
+            "cost_per_1k_input_usd": {
+              "type": "number",
+              "minimum": 0,
+              "description": "USD per 1000 prompt tokens. Required for `max_usd` to be enforceable; without it the cap is inert and the run says so. Configured rather than built-in because prices change."
+            },
+            "cost_per_1k_output_usd": {
+              "type": "number",
+              "minimum": 0,
+              "description": "USD per 1000 completion tokens. Required for `max_usd` to be enforceable."
             }
           },
           "additionalProperties": false

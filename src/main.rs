@@ -144,6 +144,21 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         );
     }
 
+    // A spend cap that cannot be computed is worse than none: it looks enforced
+    // and is not. Say so rather than letting a budget silently not apply.
+    if manifest
+        .optimization
+        .budget
+        .as_ref()
+        .is_some_and(manifest::Budget::spend_cap_is_inert)
+    {
+        println!(
+            "⚠️  `max_usd` is set but `cost_per_1k_input_usd` / `cost_per_1k_output_usd` are \
+             not, so the spend cap CANNOT be enforced and will never trigger. Configure both \
+             prices, or remove `max_usd`."
+        );
+    }
+
     // Baseline is captured on the first epoch that actually evaluates, before
     // any rule has been mutated, and never re-captured.
     let mut baseline: Option<Vec<patch::EvaluatorOutcome>> = None;
@@ -430,19 +445,25 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 );
             }
 
-            let new_rule = optimizer::run_optimizer_with_context(
-                &manifest.optimization.meta_llm,
+            let budget_cfg = manifest.optimization.budget.clone().unwrap_or_default();
+            let spec = optimizer::optimizer_spec(
                 &stderr,
                 &manifest.task_prompt,
                 &optimizer_visible,
                 localized.as_deref(),
-            )
-            .await
-            .with_context(|| {
-                "The Meta-Optimizer could not produce a usable new rule. The agent is not \
+            );
+            let (reply, usage) =
+                llm_client::complete_tracked(&manifest.optimization.meta_llm, &spec.as_spec())
+                    .await
+                    .with_context(|| {
+                        "The Meta-Optimizer could not produce a usable new rule. The agent is not \
                  necessarily still at fault — verify the meta_llm endpoint and key before \
                  trusting any further optimization."
-            })?;
+                    })?;
+            if let Some(usage) = usage {
+                llm_client::report_spend(&mut tracker, &usage, &budget_cfg);
+            }
+            let new_rule = optimizer::finish_rule(reply, &optimizer_visible)?;
 
             // Append the generated rule to rules.json
             if let Some(parent) = target_rules_file.parent() {

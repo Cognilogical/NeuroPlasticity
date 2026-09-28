@@ -304,10 +304,14 @@ A patch decision should be re-verifiable months later, which requires knowing wh
   "budget": {
     "max_wall_clock_seconds": 900,
     "max_usd": 5.00,
-    "on_exceed": "halt"
+    "on_exceed": "halt",
+    "cost_per_1k_input_usd": 0.00015,
+    "cost_per_1k_output_usd": 0.0006
   }
 }
 ```
+
+`max_usd` is only enforceable with both token prices set, since the harness has no built-in price table — those numbers change constantly, and a stale table would make the cap quietly wrong. If you set `max_usd` without them, the run says so loudly rather than pretending to enforce it. Local (`embedded`) inference is not billed and accrues nothing.
 
 The budget is checked **before each epoch**, so a halted run stops promptly rather than after another 120-second container spin-up. `on_exceed` defaults to `halt`; set it to `warn` to log and continue.
 

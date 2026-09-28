@@ -124,6 +124,25 @@ pub struct Budget {
     /// What to do when a limit is reached.
     #[serde(default)]
     pub on_exceed: OnExceed,
+    /// USD per 1000 prompt tokens, for `max_usd` accounting.
+    ///
+    /// Deliberately configuration rather than a built-in price table: prices
+    /// change constantly, and a stale hardcoded table would make the cap
+    /// quietly wrong. Without these, `max_usd` cannot be enforced and the run
+    /// says so.
+    #[serde(default)]
+    pub cost_per_1k_input_usd: Option<f64>,
+    /// USD per 1000 completion tokens, for `max_usd` accounting.
+    #[serde(default)]
+    pub cost_per_1k_output_usd: Option<f64>,
+}
+
+impl Budget {
+    /// True when a spend cap is declared but cannot actually be enforced.
+    pub fn spend_cap_is_inert(&self) -> bool {
+        self.max_usd.is_some()
+            && (self.cost_per_1k_input_usd.is_none() || self.cost_per_1k_output_usd.is_none())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -406,5 +425,36 @@ mod tests {
         assert_eq!(b.max_wall_clock_seconds, Some(900));
         assert_eq!(b.max_usd, Some(5.0));
         assert_eq!(b.on_exceed, OnExceed::Halt);
+    }
+
+    /// A spend cap that cannot be computed looks enforced and is not, so it
+    /// must be reported as inert rather than silently ignored.
+    #[test]
+    fn a_spend_cap_without_prices_is_inert() {
+        let b: Budget = serde_json::from_str(r#"{"max_usd": 5.0}"#).unwrap();
+        assert!(b.spend_cap_is_inert());
+    }
+
+    #[test]
+    fn a_spend_cap_with_both_prices_is_enforceable() {
+        let b: Budget = serde_json::from_str(
+            r#"{"max_usd": 5.0, "cost_per_1k_input_usd": 0.0001, "cost_per_1k_output_usd": 0.0002}"#,
+        )
+        .unwrap();
+        assert!(!b.spend_cap_is_inert());
+    }
+
+    #[test]
+    fn no_spend_cap_is_not_inert() {
+        let b: Budget = serde_json::from_str(r#"{"max_wall_clock_seconds": 60}"#).unwrap();
+        assert!(!b.spend_cap_is_inert());
+    }
+
+    /// One price configured is still not enough to compute a cost.
+    #[test]
+    fn a_partial_price_config_is_still_inert() {
+        let b: Budget =
+            serde_json::from_str(r#"{"max_usd": 5.0, "cost_per_1k_input_usd": 0.0001}"#).unwrap();
+        assert!(b.spend_cap_is_inert());
     }
 }

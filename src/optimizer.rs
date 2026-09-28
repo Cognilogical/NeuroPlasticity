@@ -125,6 +125,72 @@ pub async fn run_llm_optimizer(
 /// blob. A rule written against step 7 can be phrased about step 7; a rule
 /// written against a whole-run log is necessarily global, and global rules are
 /// how an optimizer fixes one behavior and quietly changes three others.
+/// Build the optimizer's request without sending it, so the caller can account
+/// for token usage before the reply is validated (F7).
+///
+/// The user prompt is owned by the returned value because `CompletionSpec`
+/// borrows it.
+pub struct OptimizerRequest {
+    pub system_prompt: &'static str,
+    pub user_prompt: String,
+    pub json_schema: serde_json::Value,
+}
+
+impl OptimizerRequest {
+    pub fn as_spec(&self) -> CompletionSpec<'_> {
+        CompletionSpec {
+            system_prompt: self.system_prompt,
+            user_prompt: &self.user_prompt,
+            json_schema: Some(self.json_schema.clone()),
+        }
+    }
+}
+
+pub fn optimizer_spec(
+    failing_logs: &str,
+    task_prompt: &str,
+    existing_rules: &[crate::rules::Rule],
+    localized: Option<&str>,
+) -> OptimizerRequest {
+    let (system_prompt, _) = build_prompts(localized);
+    OptimizerRequest {
+        system_prompt,
+        user_prompt: build_user_prompt(failing_logs, task_prompt, existing_rules, localized),
+        json_schema: rule_schema(localized.is_some()),
+    }
+}
+
+/// Validate a reply into a rule, rejecting duplicates against existing rules.
+pub fn finish_rule(
+    value: serde_json::Value,
+    existing_rules: &[crate::rules::Rule],
+) -> Result<GeneratedRule> {
+    let raw = value
+        .get("rule")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Meta-Optimizer reply had no 'rule' field: {}", value))?;
+    let rule = validate_rule(raw)?;
+    let unit = value
+        .get("unit")
+        .and_then(|u| u.as_str())
+        .map(str::to_string);
+    check_duplicate(&rule, existing_rules)?;
+    Ok(GeneratedRule { text: rule, unit })
+}
+
+fn check_duplicate(rule: &str, existing_rules: &[crate::rules::Rule]) -> Result<()> {
+    if existing_rules
+        .iter()
+        .any(|existing| existing.text().trim().eq_ignore_ascii_case(rule))
+    {
+        bail!(
+            "Meta-Optimizer repeated an existing rule: \"{}\" — refusing to append a duplicate",
+            rule
+        );
+    }
+    Ok(())
+}
+
 pub async fn run_optimizer_with_context(
     config: &MetaLlmConfig,
     failing_logs: &str,
@@ -132,8 +198,15 @@ pub async fn run_optimizer_with_context(
     existing_rules: &[crate::rules::Rule],
     localized: Option<&str>,
 ) -> Result<GeneratedRule> {
-    let (system_prompt, _localization_note) = match localized {
-        Some(_) => (
+    let request = optimizer_spec(failing_logs, task_prompt, existing_rules, localized);
+    let value = ask_llm_json(config, &request.as_spec()).await?;
+    finish_rule(value, existing_rules)
+}
+
+#[allow(dead_code)]
+fn build_prompts(localized: Option<&str>) -> (&'static str, &'static str) {
+    if localized.is_some() {
+        (
             concat!(
                 "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule ",
                 "that fixes the agent's failure.\n",
@@ -149,8 +222,9 @@ pub async fn run_optimizer_with_context(
                 "failed with those rules active."
             ),
             "",
-        ),
-        None => (
+        )
+    } else {
+        (
             concat!(
                 "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule ",
                 "that fixes the agent's failure.\n",
@@ -163,9 +237,16 @@ pub async fn run_optimizer_with_context(
                 "failed with those rules active."
             ),
             "",
-        ),
-    };
+        )
+    }
+}
 
+fn build_user_prompt(
+    failing_logs: &str,
+    task_prompt: &str,
+    existing_rules: &[crate::rules::Rule],
+    localized: Option<&str>,
+) -> String {
     let rules_json =
         serde_json::to_string_pretty(existing_rules).unwrap_or_else(|_| "[]".to_string());
 
@@ -181,7 +262,7 @@ pub async fn run_optimizer_with_context(
     // F5: when the failure is attributable to a unit, lead with that narrow
     // context so the rule can be phrased narrowly. The whole-run log is still
     // included — localization is additional signal, not a replacement.
-    let user_prompt = match localized {
+    match localized {
         Some(localized) => format!(
             "Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\n\
              {}\n\nFull Run Logs (context only; scope your rule to the unit above):\n{}",
@@ -191,40 +272,7 @@ pub async fn run_optimizer_with_context(
             "Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\nFailing Logs:\n{}",
             task_prompt, rules_json, truncated_logs
         ),
-    };
-    let spec = CompletionSpec {
-        system_prompt,
-        user_prompt: &user_prompt,
-        json_schema: Some(rule_schema(localized.is_some())),
-    };
-
-    let value = ask_llm_json(config, &spec).await?;
-    let raw = value
-        .get("rule")
-        .and_then(|r| r.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Meta-Optimizer reply had no 'rule' field: {}", value))?;
-
-    let rule = validate_rule(raw)?;
-
-    // F5: which unit motivated this rule, so a reviewer checks a narrow claim.
-    let unit = value
-        .get("unit")
-        .and_then(|u| u.as_str())
-        .map(str::to_string);
-
-    // The prompt forbids repeats; enforce it, otherwise a looping model
-    // appends the same constraint to rules.json every epoch.
-    if existing_rules
-        .iter()
-        .any(|existing| existing.text().trim().eq_ignore_ascii_case(&rule))
-    {
-        bail!(
-            "Meta-Optimizer repeated an existing rule: \"{}\" — refusing to append a duplicate",
-            rule
-        );
     }
-
-    Ok(GeneratedRule { text: rule, unit })
 }
 
 /// A rule and, when the failure was attributable, the step it addresses.

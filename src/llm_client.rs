@@ -22,6 +22,48 @@ const DEFAULT_TEMPERATURE: f64 = 0.0;
 /// the whole epoch.
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 
+/// Token accounting for one completion, as reported by the provider (F7).
+///
+/// Most OpenAI-compatible endpoints return this in `usage`; local inference
+/// does not, in which case cost is simply zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl Usage {
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    /// Cost in USD, given per-1k-token prices. Prices are configuration rather
+    /// than a built-in table: they change constantly, and guessing wrong would
+    /// make a budget cap quietly meaningless.
+    pub fn cost_usd(&self, input_per_1k: f64, output_per_1k: f64) -> f64 {
+        (self.prompt_tokens as f64 / 1000.0) * input_per_1k
+            + (self.completion_tokens as f64 / 1000.0) * output_per_1k
+    }
+}
+
+/// Parse `usage` out of a response body, if the provider reported one.
+fn parse_usage(body: &str) -> Option<Usage> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let usage = value.get("usage")?;
+    Some(Usage {
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .or_else(|| usage.get("input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        completion_tokens: usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
+}
+
 /// A completion request against the configured meta-llm.
 pub struct CompletionSpec<'a> {
     pub system_prompt: &'a str,
@@ -60,6 +102,14 @@ pub async fn ask_llm_json(
 }
 
 async fn complete(config: &MetaLlmConfig, spec: &CompletionSpec<'_>) -> Result<serde_json::Value> {
+    complete_tracked(config, spec).await.map(|(value, _)| value)
+}
+
+/// As [`complete`], but also reports token usage when the provider does (F7).
+pub async fn complete_tracked(
+    config: &MetaLlmConfig,
+    spec: &CompletionSpec<'_>,
+) -> Result<(serde_json::Value, Option<Usage>)> {
     let expect_json = spec.json_schema.is_some();
 
     if config.provider == "embedded" {
@@ -71,11 +121,13 @@ async fn complete(config: &MetaLlmConfig, spec: &CompletionSpec<'_>) -> Result<s
                 config.model_path.as_ref(),
             )
             .await?;
-            return if expect_json {
-                parse_json_object(&text)
+            // Local inference is not billed, so there is nothing to accrue.
+            let value = if expect_json {
+                parse_json_object(&text)?
             } else {
-                Ok(serde_json::Value::String(text))
+                serde_json::Value::String(text)
             };
+            return Ok((value, None));
         }
         #[cfg(not(feature = "embedded-llm"))]
         {
@@ -89,6 +141,24 @@ async fn complete(config: &MetaLlmConfig, spec: &CompletionSpec<'_>) -> Result<s
     let style = resolve_style(config, &url)?;
     let payload = build_payload(config, spec, style);
     post_completion(&url, token.as_deref(), payload, style, expect_json).await
+}
+
+/// Report cumulative spend to the budget, using configured token prices.
+pub fn report_spend(
+    tracker: &mut crate::manifest::BudgetTracker,
+    usage: &Usage,
+    budget: &crate::manifest::Budget,
+) {
+    let input_price = budget.cost_per_1k_input_usd.unwrap_or(0.0);
+    let output_price = budget.cost_per_1k_output_usd.unwrap_or(0.0);
+    let cost = usage.cost_usd(input_price, output_price);
+    if cost > 0.0 {
+        println!(
+            "   💰 {:.4} USD ({} prompt + {} completion tokens)",
+            cost, usage.prompt_tokens, usage.completion_tokens
+        );
+    }
+    tracker.add_spend(cost);
 }
 
 /// Which OpenAI wire protocol to speak.
@@ -320,7 +390,7 @@ async fn post_completion(
     mut payload: serde_json::Value,
     style: ApiStyle,
     expect_json: bool,
-) -> Result<serde_json::Value> {
+) -> Result<(serde_json::Value, Option<Usage>)> {
     let client = reqwest::Client::builder()
         .timeout(ATTEMPT_TIMEOUT)
         .build()
@@ -392,12 +462,14 @@ async fn post_completion(
             }
         };
 
+        let usage = parse_usage(&body);
+
         if !expect_json {
-            return Ok(serde_json::Value::String(text));
+            return Ok((serde_json::Value::String(text), usage));
         }
 
         match parse_json_object(&text) {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Ok((value, usage)),
             Err(e) => {
                 // Off-contract completion (prose, markdown fence, truncated
                 // JSON): retry rather than scoring garbage.
@@ -873,5 +945,50 @@ mod tests {
             "unexpected reply: {}",
             value
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::{Usage, parse_usage};
+
+    #[test]
+    fn reads_openai_style_usage() {
+        let body = r#"{"choices":[{"message":{"content":"hi"}}],
+                      "usage":{"prompt_tokens":120,"completion_tokens":45}}"#;
+        let u = parse_usage(body).unwrap();
+        assert_eq!(u.prompt_tokens, 120);
+        assert_eq!(u.completion_tokens, 45);
+        assert_eq!(u.total_tokens(), 165);
+    }
+
+    /// Some providers use the Responses API's field names.
+    #[test]
+    fn reads_responses_style_usage() {
+        let body = r#"{"output":[],"usage":{"input_tokens":10,"output_tokens":3}}"#;
+        let u = parse_usage(body).unwrap();
+        assert_eq!(u.prompt_tokens, 10);
+        assert_eq!(u.completion_tokens, 3);
+    }
+
+    #[test]
+    fn absent_usage_is_none_not_zero() {
+        assert!(parse_usage(r#"{"choices":[]}"#).is_none());
+    }
+
+    #[test]
+    fn cost_is_computed_from_configured_prices() {
+        let u = Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 500,
+        };
+        // 1k prompt @ 0.0001 + 0.5k completion @ 0.0002
+        assert!((u.cost_usd(0.0001, 0.0002) - 0.0002).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_free_call_costs_nothing() {
+        let u = Usage::default();
+        assert_eq!(u.cost_usd(0.001, 0.002), 0.0);
     }
 }
