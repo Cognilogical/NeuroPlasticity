@@ -8,7 +8,7 @@ NeuroPlasticity is a highly isolated, self-healing testing environment for AI CL
 
 At the core of NeuroPlasticity is the evaluation and optimization loop. If an agent fails to accomplish its task, the orchestrator feeds the `stderr` and evaluation results to an embedded Meta-Optimizer LLM. 
 
-To save immense amounts of compute time (and LLM tokens), NeuroPlasticity v1.0.1 introduces the **Deterministic Fingerprint Cache**. Before spinning up a 120-second container, it hashes the entire test configuration. If that exact configuration previously failed, it skips execution and instantly feeds the cached logs back to the optimizer to force a new breakthrough rule.
+To save immense amounts of compute time (and LLM tokens), NeuroPlasticity introduces the **Deterministic Fingerprint Cache**. Before spinning up a 120-second container, it hashes the entire test configuration. If that exact configuration previously failed, it skips execution and instantly feeds the cached logs back to the optimizer to force a new breakthrough rule.
 
 The hash covers the agent command, manifest name, `meta_llm.provider`, `meta_llm.model`, `meta_llm.base_url`, the serialized evaluators, and the current rule state. Field boundaries are length-prefixed so two different configurations cannot collide by concatenation. Including the provider and base URL matters because only *failures* are cached: the same model name on a different backend is a different grader, and replaying its cached verdict would poison the optimization loop.
 
