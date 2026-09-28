@@ -126,6 +126,73 @@
           "description": "Optional. Omit for 'annotate', which matches pre-existing behavior.",
           "additionalProperties": false
         },
+        "data": {
+          "type": "object",
+          "description": "Optional. Omit the whole block and the manifest is unclassified: no egress enforcement applies, so existing manifests are unaffected. Declaring `data_class` turns enforcement on, and any provider not listed in `allow` is denied.",
+          "properties": {
+            "data_class": {
+              "type": "string",
+              "enum": ["public", "internal", "regulated", "restricted"],
+              "description": "How sensitive this manifest's data is."
+            },
+            "egress": {
+              "type": "object",
+              "description": "Read only when `data_class` is declared.",
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "description": "Permitted outbound paths. `embedded` never leaves the machine; `hosted` covers any remote endpoint.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "enum": ["embedded", "hosted"]
+                      },
+                      "max_class": {
+                        "type": "string",
+                        "enum": ["public", "internal", "regulated", "restricted"],
+                        "description": "The highest data class this provider may receive."
+                      }
+                    },
+                    "required": ["provider", "max_class"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "rules": {
+          "type": "object",
+          "description": "Optional. Policy for the target rules file.",
+          "properties": {
+            "policy": {
+              "type": "object",
+              "properties": {
+                "default_class": {
+                  "type": "string",
+                  "enum": ["behavioral", "constraint"],
+                  "description": "Class applied to rules with no explicit class. Defaults to behavioral."
+                },
+                "protected": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Rules the optimizer may never modify or drop. A change to one is quarantined, reverted, and reported for human sign-off rather than described as an improvement."
+                },
+                "protected_match": {
+                  "type": "string",
+                  "enum": ["exact", "prefix"],
+                  "description": "How `protected` entries are matched, since rule text drifts. Defaults to exact."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
         "meta_llm": {
           "type": "object",
           "properties": {

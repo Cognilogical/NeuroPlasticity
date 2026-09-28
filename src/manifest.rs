@@ -83,6 +83,33 @@ impl Default for RegressionGuard {
     }
 }
 
+/// Policy for `target_rules_file`: which rules the optimizer may not touch,
+/// and how the file is parsed (F2).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RulesFile {
+    #[serde(default)]
+    pub policy: crate::rules::RulePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataPolicy {
+    /// Optional. Absent means the manifest is unclassified (F3).
+    #[serde(default)]
+    pub data_class: Option<crate::egress::DataClass>,
+    /// Optional. Read only when `data_class` is declared.
+    #[serde(default)]
+    pub egress: Option<crate::egress::EgressPolicy>,
+}
+
+impl Default for DataPolicy {
+    fn default() -> Self {
+        Self {
+            data_class: None,
+            egress: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Optimization {
     pub target_rules_file: String,
@@ -92,6 +119,12 @@ pub struct Optimization {
     /// Optional. Absent means `annotate`, which matches pre-existing behavior.
     #[serde(default)]
     pub regression_guard: Option<RegressionGuard>,
+    /// Optional. Absent means no protected rules, so nothing is quarantined.
+    #[serde(default)]
+    pub rules: Option<RulesFile>,
+    /// Optional. Absent means unclassified and no egress enforcement (F3).
+    #[serde(default)]
+    pub data: Option<DataPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

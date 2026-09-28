@@ -233,6 +233,7 @@ pub fn render_patch(
     outcome: &RunOutcome,
     report: Option<&ManifestReport>,
     rules: &[String],
+    quarantined: &[crate::rules::QuarantinedChange],
 ) -> String {
     let mut doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
     doc.push_str(&format!("**Target Project:** `{}`\n", target_project));
@@ -271,11 +272,30 @@ pub fn render_patch(
             doc.push_str(&format!("regressed_evaluator: {}\n", name));
         }
     }
+    // Constraint changes are never described as verified improvements (F2).
+    for change in quarantined {
+        doc.push_str(&format!(
+            "quarantined_rule: {} ({})\n",
+            change.rule_text, change.reason
+        ));
+    }
     doc.push_str("-->\n\n");
 
     let guidance = outcome.application_guidance(rules.len());
     if !guidance.is_empty() {
         doc.push_str(guidance);
+        doc.push('\n');
+    }
+
+    if !quarantined.is_empty() {
+        doc.push_str("### ⚠️ Quarantined constraint changes (NOT applied)\n\n");
+        doc.push_str(
+            "The optimizer attempted to change rules marked as protected. These were **reverted** and \
+             require human sign-off. They are not improvements:\n\n",
+        );
+        for change in quarantined {
+            doc.push_str(&format!("- `{}` — {}\n", change.rule_text, change.reason));
+        }
         doc.push('\n');
     }
 
@@ -413,6 +433,7 @@ mod tests {
             },
             None,
             &["Do not wrap JSON in fences".to_string()],
+            &[],
         );
         assert!(patch.contains("PARTIAL"), "{}", patch);
         assert!(!patch.contains("permanently inject"), "{}", patch);
@@ -429,6 +450,7 @@ mod tests {
             },
             None,
             &["rule one".to_string()],
+            &[],
         );
         assert!(partial.contains("outcome: partial"), "{}", partial);
         assert!(partial.contains("rules_verified: false"), "{}", partial);
@@ -443,6 +465,7 @@ mod tests {
             },
             Some(&sample_report()),
             &["rule one".to_string()],
+            &[],
         );
         assert!(regressed.contains("outcome: regressed"), "{}", regressed);
         assert!(regressed.contains("rules_verified: false"), "{}", regressed);
@@ -452,6 +475,7 @@ mod tests {
             &RunOutcome::Verified,
             None,
             &["rule one".to_string()],
+            &[],
         );
         assert!(verified.contains("outcome: verified"), "{}", verified);
         assert!(verified.contains("rules_verified: true"), "{}", verified);
@@ -470,6 +494,7 @@ mod tests {
             },
             Some(&sample_report()),
             &["rule".to_string()],
+            &[],
         );
         assert!(
             patch.contains("regressed_evaluator: host_bash: no secrets"),
@@ -487,6 +512,7 @@ mod tests {
             &RunOutcome::Verified,
             Some(&sample_report()),
             &["The only real rule.".to_string()],
+            &[],
         );
 
         // Every `###` heading must be a real section, never a table row.
@@ -505,7 +531,7 @@ mod tests {
 
     #[test]
     fn verified_runs_label_the_section_as_verified() {
-        let verified = render_patch("d", &RunOutcome::Verified, None, &["r".to_string()]);
+        let verified = render_patch("d", &RunOutcome::Verified, None, &["r".to_string()], &[]);
         assert!(verified.contains("### Verified rules"), "{}", verified);
         assert!(!verified.contains("### Proposed rules"), "{}", verified);
 
@@ -517,6 +543,7 @@ mod tests {
             },
             None,
             &["r".to_string()],
+            &[],
         );
         assert!(partial.contains("### Proposed rules"), "{}", partial);
         assert!(!partial.contains("### Verified rules"), "{}", partial);
@@ -526,9 +553,56 @@ mod tests {
     /// nothing to inject, and the phrasing implies otherwise.
     #[test]
     fn no_rules_means_nothing_to_apply() {
-        let patch = render_patch("d", &RunOutcome::Verified, None, &[]);
+        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[]);
         assert!(!patch.contains("permanently inject"), "{}", patch);
         assert!(!patch.contains("#### Rule"), "{}", patch);
+    }
+
+    /// A small model can echo the schema instruction instead of answering it,
+    /// producing a degenerate repeat. That is a malformed reply, not a rule.
+    #[test]
+    fn degenerate_repeated_rule_is_rejected() {
+        let mut rule = String::from(
+            "Write the JSON object with the key 'rule' and the value as a string containing ",
+        );
+        for _ in 0..12 {
+            rule.push_str(
+                "the JSON object with the key 'rule' and the value as a string containing ",
+            );
+        }
+        rule.push_str("the rule.");
+        assert!(
+            crate::optimizer::validate_rule(&rule).is_err(),
+            "a 1KB instruction echo must not become a behavioral rule"
+        );
+    }
+
+    /// Quarantined changes must be visible in the artifact and never described
+    /// as improvements.
+    #[test]
+    fn quarantined_changes_are_reported_not_claimed() {
+        let patch = render_patch(
+            "d",
+            &RunOutcome::Verified,
+            None,
+            &["Be terse.".to_string()],
+            &[crate::rules::QuarantinedChange {
+                rule_text: "Never disclose credentials".to_string(),
+                reason: "protected rule was removed or altered by the optimizer".to_string(),
+            }],
+        );
+        assert!(
+            patch.contains("quarantined_rule: Never disclose credentials"),
+            "{}",
+            patch
+        );
+        assert!(patch.contains("NOT applied"), "{}", patch);
+        assert!(patch.contains("require human sign-off"), "{}", patch);
+        assert!(
+            patch.contains("not improvements") || patch.contains("require human sign-off"),
+            "a constraint change must not read as a win: {}",
+            patch
+        );
     }
 
     // --- F1 ---
@@ -591,6 +665,7 @@ mod tests {
             },
             Some(&report),
             &["broaden the rule".to_string()],
+            &[],
         );
         assert!(patch.contains("outcome: regressed"), "{}", patch);
         assert!(patch.contains("rules_verified: false"), "{}", patch);
@@ -633,6 +708,7 @@ mod tests {
             },
             Some(&sample_report()),
             &["be careful".to_string()],
+            &[],
         );
         assert!(
             patch.contains("| `host_bash: no secrets` | PASS | FAIL | **REGRESSION** |"),

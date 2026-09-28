@@ -25,6 +25,8 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Zero-Dockerfile JIT Setup:** No need to build custom, bloated container images. NeuroPlasticity uses standard base images (like `node:20-slim` or `python:3.12-slim`) and installs your agent Just-In-Time using a `setup_script` array in your manifest.
 *   **Zero-Config Auth:** Mount host credential directories (e.g., `~/.claude.json`, `~/.config/opencode`, `~/.local/share/opencode`) as read-only to bypass complex OAuth flows in ephemeral sandboxes.
 *   **Fail Loud, Never Silent:** API errors are surfaced with their status and body instead of being coerced into plausible-looking model output. An LLM evaluator that cannot be reached aborts the run rather than recording a failure the agent never caused.
+*   **Honest Artifacts:** The patch header states what actually happened, derived from the run rather than hardcoded. A failed or regressed run never claims its rules were verified, and never instructs you to inject them.
+*   **Protected Rules & Data Egress (opt-in):** Mark safety/compliance rules immutable to the optimizer — they are hidden from it and any attempted change is quarantined for human sign-off. Declare a data class to control which providers may receive your material, with `--print-egress-plan` to inspect the outbound path before a run.
 *   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run a 4-bit `Qwen3` model directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads; the candidate list is editable at `~/.config/NeuroPlasticity/models.json`. Prompts are assembled with the chat template embedded in each GGUF, so non-Qwen models are not silently mis-prompted. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
 *   **Release binaries include the offline engine:** The published artifacts are built with `--features embedded-llm`, and CI asserts the engine is actually present before uploading. Builds without that flag compile successfully but abort at runtime on `provider: "embedded"`, so the check is enforced rather than documented.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
@@ -167,7 +169,7 @@ Notes:
 ### 1. Baking in Heavy Dependencies (MCP Servers)
 If your agent relies on heavy external tools like `sqlite`, a Python environment, or an MCP (Model Context Protocol) server, the JIT `setup_script` might be too slow. In this case, build a custom `Containerfile` or `Dockerfile` and point your `plasticity.json` to that image instead.
 
-### 3. Patch Honesty & the Regression Guard
+### 3. Patch Honesty, Regression Guard, Protected Rules & Egress
 
 `pass_threshold` is a **run-level** scalar: the score is `passing_weight / total_weight` across all evaluators, so a passing run can still hide an individually failing evaluator. NeuroPlasticity captures a per-evaluator baseline on the first evaluated epoch, before any rule is mutated, and diffs against it afterwards.
 
@@ -209,7 +211,63 @@ To refuse the patch entirely when a regression appears, set the guard to `block`
 
 Omitting `regression_guard` keeps the default `annotate` behavior: report the regression, mark the patch, still emit it.
 
-### 4. Chained Evaluators & Preventing Regressions
+### 4. Protected Rules & Data Egress
+
+Two opt-in blocks keep the automated loop away from the parts of your prompt it shouldn't touch. **Both are absent by default, so existing manifests are unaffected.**
+
+**Protected rules (F2).** A safety or compliance constraint and a sandboxed behavioral tweak are not the same kind of data. Mark the ones the optimizer may never modify:
+
+```json
+"optimization": {
+  "rules": { "policy": {
+    "protected": ["Escalate emergencies to 911 immediately"],
+    "protected_match": "prefix"
+  }}
+}
+```
+
+Protected rules are **hidden from the optimizer's prompt** rather than merely protected afterward, because a model shown a constraint tends to reword it. If a change is attempted anyway, it is reverted in the rules file, recorded in `neuroplasticity_quarantine.md`, reported in the patch under "Quarantined constraint changes (NOT applied)", and never described as an improvement. `protected_match` accepts `exact` (default) and `prefix`, since rule text drifts.
+
+The rules file itself accepts both shapes, so existing files keep working:
+
+```json
+["Behavior rule the optimizer may edit"]
+```
+
+```json
+[{"class": "constraint", "text": "Never disclose credentials"}]
+```
+
+**Data egress (F3).** Declare how sensitive the material is, and which providers may receive it:
+
+```json
+"optimization": {
+  "data": {
+    "data_class": "regulated",
+    "egress": { "allow": [
+      { "provider": "embedded",  "max_class": "restricted" },
+      { "provider": "hosted",    "max_class": "internal" }
+    ] }
+  }
+}
+```
+
+Classes are ordered `public` < `internal` < `regulated` < `restricted`. With no `data_class`, nothing is enforced. With one, **unlisted hosted providers are denied** and a denial aborts the run before any container starts, naming the provider, the class, and the fix. `embedded` is always permitted regardless — local inference never leaves the machine, which is what lets you run restricted data with a local model and an empty allow list.
+
+Check what a manifest would do before running it:
+
+```bash
+./neuroplasticity plasticity.json --print-egress-plan
+```
+
+```
+Data class: regulated
+meta_llm provider: custom
+
+  meta-optimizer    hosted → DENIED  (regulated data to a hosted provider: not listed…)
+```
+
+### 5. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

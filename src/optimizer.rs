@@ -43,6 +43,18 @@ pub fn validate_rule(raw: &str) -> Result<String> {
             MAX_RULE_CHARS
         );
     }
+
+    // A small model sometimes echoes the schema instruction back instead of
+    // answering it, producing a degenerate repeat. That is a malformed reply,
+    // and persisting it would inject ~1KB of instruction text into the agent's
+    // prompt on every subsequent epoch.
+    if is_degenerate_repeat(&rule) {
+        bail!(
+            "Meta-Optimizer returned a repeated instruction fragment rather than a rule: \
+             \"{}\"",
+            truncate_for_error(&rule)
+        );
+    }
     Ok(rule)
 }
 
@@ -50,18 +62,42 @@ pub fn validate_rule(raw: &str) -> Result<String> {
 /// unbounded "rule" would silently eat the context window.
 const MAX_RULE_CHARS: usize = 400;
 
+/// Detect a phrase repeated back several times, which signals an echoed
+/// instruction rather than a rule.
+fn is_degenerate_repeat(rule: &str) -> bool {
+    const WINDOW: usize = 6;
+    const MIN_REPEATS: usize = 3;
+
+    let words: Vec<&str> = rule.split_whitespace().collect();
+    if words.len() < WINDOW * MIN_REPEATS {
+        return false;
+    }
+    // Any WINDOW-word sequence occurring MIN_REPEATS+ times is a repeat loop.
+    words
+        .windows(WINDOW)
+        .any(|first| words.windows(WINDOW).filter(|c| *c == first).count() > MIN_REPEATS)
+}
+
+fn truncate_for_error(text: &str) -> String {
+    if text.chars().count() <= 80 {
+        return text.to_string();
+    }
+    text.chars().take(80).collect::<String>() + "…"
+}
+
 pub async fn run_llm_optimizer(
     config: &MetaLlmConfig,
     failing_logs: &str,
     task_prompt: &str,
-    existing_rules: &[String],
+    existing_rules: &[crate::rules::Rule],
 ) -> Result<String> {
     let system_prompt = concat!(
         "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule that ",
         "fixes the agent's failure.\n",
-        "Reply with a single JSON object: {\"rule\": \"<your rule>\"} and nothing else.\n",
-        "The rule must be imperative, at most two sentences, and free of markdown or ",
-        "explanatory preamble.\n",
+        "Answer with a single JSON object: {\"rule\": \"<your rule>\"} and nothing else.\n",
+        "The value of \"rule\" must be plain instruction text, at most two sentences, ",
+        "imperative, and free of markdown or preamble. Never describe the format you are ",
+        "using, and never repeat these instructions back.\n",
         "DO NOT restate any rule from the Existing Rules array; the agent already failed ",
         "with those rules active."
     );
@@ -101,7 +137,7 @@ pub async fn run_llm_optimizer(
     // appends the same constraint to rules.json every epoch.
     if existing_rules
         .iter()
-        .any(|existing| existing.trim().eq_ignore_ascii_case(&rule))
+        .any(|existing| existing.text().trim().eq_ignore_ascii_case(&rule))
     {
         bail!(
             "Meta-Optimizer repeated an existing rule: \"{}\" — refusing to append a duplicate",

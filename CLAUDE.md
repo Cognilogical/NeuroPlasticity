@@ -76,6 +76,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full walkthrough. Key p
 - `src/evaluator.rs` — Tri-State Evaluators, run concurrently under a semaphore. LLM verdicts are JSON Schema output; infrastructure errors abort the run.
 - `src/optimizer.rs` — Meta-Optimizer. Returns a structured `{"rule": ...}` that is sanitized, length-capped, and de-duplicated before being persisted.
 - `src/llm_client.rs` — the single request path for `custom` providers: deadline, retries, provider-error surfacing, and both `chat/completions` and `responses` wire formats.
+- `src/rules.rs` — the rules-file model (`behavioral` / `constraint`) and the protected-rule policy. A protected rule is hidden from the optimizer, and an attempted change is reverted and quarantined.
+- `src/egress.rs` — data-class and egress policy. Opt-in: absent `data_class`, no enforcement. With one, unlisted hosted providers are denied and the run aborts naming the provider, class, and remedy.
+- `src/patch.rs` — patch rendering. The status line is a function of the run outcome (`Verified` / `Partial` / `Regressed`), never a constant, and only a verified run earns "permanently inject" advice.
 - `src/embedded_llm.rs` — local `llama.cpp` inference, GGUF discovery/caching, and per-model chat templates.
 - `src/fingerprint.rs` — failure-only cache keyed on the full test configuration.
 
@@ -85,5 +88,6 @@ Model configuration lives in exactly one place: `optimization.meta_llm` in `plas
 
 - **Fail loud.** Never convert an API error into plausible-looking model output; a swallowed error becomes a grader verdict and then a cached "known failure."
 - **Determinism by default.** `temperature` defaults to `0.0`; grading must not flap between runs.
-- **Treat generated rules as code.** They are injected into an agent prompt forever, so validate before persisting.
+- **Treat generated rules as code.** They are injected into an agent prompt forever, so validate before persisting. A rule marked `constraint` is never optimizer-writable.
+- **Never emit an unearned claim.** A patch header's status must derive from the run. This is the tool's central trust signal, and the failure mode is worst exactly when it matters.
 - **Platform-agnostic code paths.** Model paths use `shellexpand`/forward slashes; keep runtime branching on `cfg(target_os)` rather than OS checks.

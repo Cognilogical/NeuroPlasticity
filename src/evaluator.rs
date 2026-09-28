@@ -49,6 +49,7 @@ pub async fn evaluate(
     pass_threshold: f64,
     sandbox: &Sandbox,
     meta_llm: &MetaLlmConfig,
+    data_handling: &crate::egress::DataHandling,
 ) -> Result<EvaluationResult> {
     let mut futures = Vec::new();
 
@@ -76,6 +77,8 @@ pub async fn evaluate(
         let llm_sem_clone = Arc::clone(&llm_semaphore);
         let sys_sem_clone = Arc::clone(&system_semaphore);
         let infra_errors_clone = Arc::clone(&infra_errors);
+        // Cloned so the spawned task owns it; `tokio::spawn` requires 'static.
+        let data_handling = data_handling.clone();
 
         let handle = tokio::spawn(async move {
             let (success, output) = match eval_clone.r#type {
@@ -268,6 +271,25 @@ pub async fn evaluate(
                         .acquire()
                         .await
                         .expect("Failed to acquire LLM semaphore");
+
+                    // Egress policy (F3): a grader that may not receive this
+                    // data is a configuration error, not an agent failure.
+                    if let Err(e) = crate::egress::enforce_egress(
+                        &data_handling,
+                        &meta_llm_clone.provider,
+                        crate::egress::EgressKind::Grader,
+                    ) {
+                        infra_errors_clone
+                            .lock()
+                            .unwrap()
+                            .push(format!("LLM evaluator '{}': {}", eval_clone.name, e));
+                        return EvaluatorScore {
+                            name: eval_clone.name.clone(),
+                            success: false,
+                            weight: eval_clone.weight,
+                            output: Some(format!("Egress Error: {}", e)),
+                        };
+                    }
 
                     if let (Some(prompt), Some(target_file)) =
                         (&eval_clone.prompt, &eval_clone.target_file)

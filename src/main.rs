@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::rules::Rule;
+
 pub mod container;
+pub mod egress;
 #[cfg(feature = "embedded-llm")]
 pub mod embedded_llm;
 pub mod evaluator;
@@ -13,6 +16,7 @@ pub mod manifest;
 pub mod optimizer;
 pub mod patch;
 pub mod reporter;
+pub mod rules;
 pub mod runner;
 
 /// Result of running one manifest: pass/fail, epochs used, and the per-evaluator
@@ -24,6 +28,8 @@ struct ManifestRun {
     report: patch::ManifestReport,
     /// True when the policy is `block` and a regression was detected.
     blocked_by_regression: bool,
+    /// Protected-rule changes that were reverted (F2).
+    quarantined: Vec<rules::QuarantinedChange>,
 }
 
 async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
@@ -43,6 +49,46 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
 
     let target_rules_file = PathBuf::from(&manifest.optimization.target_rules_file);
 
+    // Egress policy (F3). Opt-in: a manifest with no `data_class` is
+    // unclassified and every check below is a no-op.
+    let data_handling = manifest
+        .optimization
+        .data
+        .as_ref()
+        .map(|d| egress::DataHandling {
+            data_class: d.data_class,
+            egress: d.egress.clone(),
+        })
+        .unwrap_or_default();
+    let meta_llm_provider = manifest.optimization.meta_llm.provider.clone();
+
+    // Warn when no hosted provider is allowed. The embedded provider is always
+    // permitted (it never leaves the machine), so an embedded-only manifest with
+    // an empty allow list is a legitimate setup, not a misconfiguration.
+    let hosted_permitted = data_handling
+        .egress
+        .as_ref()
+        .is_some_and(|policy| policy.ceiling(egress::EgressProvider::Hosted).is_some());
+    if data_handling.data_class.is_some() && !hosted_permitted {
+        println!(
+            "ℹ️  data_class is `{}` and no hosted provider is allowed, so the Meta-Optimizer \
+             will be limited to local (`embedded`) inference. Add an `egress.allow` entry if \
+             you intend to use a remote model.",
+            data_handling
+                .data_class
+                .map(|c| c.label())
+                .unwrap_or("unset")
+        );
+    }
+
+    // Checked before any container starts (F3: fail loud, early).
+    egress::enforce_egress(
+        &data_handling,
+        &meta_llm_provider,
+        egress::EgressKind::Optimizer,
+    )
+    .context("The Meta-Optimizer's provider is not permitted for this manifest's data class")?;
+
     // Prevent Path Traversal (P0 Fix)
     if target_rules_file.is_absolute()
         || target_rules_file
@@ -58,6 +104,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
     // any rule has been mutated, and never re-captured.
     let mut baseline: Option<Vec<patch::EvaluatorOutcome>> = None;
     let mut final_results: Vec<patch::EvaluatorOutcome> = Vec::new();
+    // Protected-rule changes reverted along the way (F2).
+    let mut quarantined: Vec<rules::QuarantinedChange> = Vec::new();
 
     for epoch in 1..=max_epochs {
         println!("\n--- Epoch {} / {} ---", epoch, max_epochs);
@@ -127,6 +175,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 pass_threshold,
                 &manifest.sandbox,
                 &manifest.optimization.meta_llm,
+                &data_handling,
             )
             .await
             .context("Evaluator execution failed")?;
@@ -186,6 +235,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 passed: true,
                 epochs_taken: epoch as u32,
                 blocked_by_regression: false,
+                quarantined,
                 report: patch::ManifestReport {
                     manifest_name: manifest.name.clone(),
                     passed: true,
@@ -201,22 +251,49 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         if epoch < max_epochs {
             println!("❌ Score below threshold. Invoking Meta-Optimizer...");
 
-            // Read existing rules to pass to the optimizer as context
-            let existing_rules: Vec<String> = if target_rules_file.exists() {
-                if let Ok(content) = fs::read_to_string(&target_rules_file) {
-                    serde_json::from_str(&content).unwrap_or_default()
-                } else {
-                    Vec::new()
+            let effective_rule_policy = manifest
+                .optimization
+                .rules
+                .as_ref()
+                .map(|r| r.policy.clone())
+                .unwrap_or_default();
+
+            // Read existing rules to pass to the optimizer as context. Accepts
+            // both bare strings and classified objects (F2).
+            let existing_rules: Vec<Rule> = if target_rules_file.exists() {
+                match fs::read_to_string(&target_rules_file) {
+                    Ok(content) => rules::parse_rules(&content)
+                        .with_context(|| format!("Failed to read {:?}", target_rules_file))?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e)
+                            .context(format!("Failed to read {:?}", target_rules_file)));
+                    }
                 }
             } else {
                 Vec::new()
             };
 
+            // The optimizer is only shown behavioral rules. A protected
+            // constraint is not something it is being asked to improve, and
+            // showing it invites the model to reword it (F2).
+            let optimizer_visible: Vec<Rule> = existing_rules
+                .iter()
+                .filter(|r| !effective_rule_policy.protects(r))
+                .cloned()
+                .collect();
+            if optimizer_visible.len() != existing_rules.len() {
+                println!(
+                    "   🔒 {} protected rule(s) hidden from the optimizer.",
+                    existing_rules.len() - optimizer_visible.len()
+                );
+            }
+
             let new_rule = optimizer::run_llm_optimizer(
                 &manifest.optimization.meta_llm,
                 &stderr,
                 &manifest.task_prompt,
-                &existing_rules,
+                &optimizer_visible,
             )
             .await
             .with_context(|| {
@@ -230,10 +307,54 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 fs::create_dir_all(parent)?;
             }
 
-            let mut rules_to_save = existing_rules.clone();
-            rules_to_save.push(new_rule.clone());
-            let updated_json = serde_json::to_string_pretty(&rules_to_save)?;
-            fs::write(&target_rules_file, updated_json)?;
+            let mut proposed = existing_rules.clone();
+            proposed.push(Rule::behavioral(new_rule.clone()));
+
+            // Enforce the rule policy before writing (F2): a protected rule the
+            // optimizer dropped or altered is restored, never persisted as lost.
+            let quarantine =
+                rules::enforce_policy(&existing_rules, &proposed, &effective_rule_policy);
+
+            if !quarantine.is_empty() {
+                println!(
+                    "\n⚠️  {} protected rule(s) were proposed for change — reverted and quarantined:",
+                    quarantine.changes.len()
+                );
+                for change in &quarantine.changes {
+                    println!("     - \"{}\": {}", change.rule_text, change.reason);
+                    println!(
+                        "       This requires human sign-off. It is NOT reported as an improvement."
+                    );
+                }
+                quarantined.extend(quarantine.changes.clone());
+            }
+
+            fs::write(
+                &target_rules_file,
+                rules::serialize_rules(&quarantine.accepted)?,
+            )?;
+
+            if !quarantine.is_empty() {
+                // Keep the attempted change out of the rules file, but
+                // auditable, so a reviewer can see what the optimizer wanted.
+                let quarantine_path = Path::new("neuroplasticity_quarantine.md");
+                let mut doc = String::from("# ⚠️ Quarantined rule changes\n\n");
+                doc.push_str(
+                    "The Meta-Optimizer attempted to change rules marked as protected. These \
+                     changes were **reverted** and were not applied. Review each one manually:\n\n",
+                );
+                for (i, change) in quarantine.changes.iter().enumerate() {
+                    doc.push_str(&format!(
+                        "## {}\n- **Protected rule:** `{}`\n- **Reason:** {}\n\n",
+                        i + 1,
+                        change.rule_text,
+                        change.reason
+                    ));
+                }
+                if fs::write(quarantine_path, doc).is_ok() {
+                    println!("   📄 Quarantine report written to {:?}", quarantine_path);
+                }
+            }
 
             println!("Applied new rule optimization to {:?}", target_rules_file);
         } else {
@@ -264,6 +385,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         passed: false,
         epochs_taken: max_epochs as u32,
         blocked_by_regression,
+        quarantined,
         report: patch::ManifestReport {
             manifest_name: manifest.name.clone(),
             passed: false,
@@ -284,9 +406,14 @@ async fn main() -> Result<()> {
     args.next(); // Skip executable name
 
     let mut manifest_path_str = "plasticity.json".to_string();
-    while let Some(arg) = args.next() {
+    // Collected because std::env::Args is not Clone and the flag is read twice.
+    let raw_args: Vec<String> = args.by_ref().collect();
+    let print_egress_plan = raw_args.iter().any(|a| a == "--print-egress-plan");
+
+    let mut iter = raw_args.into_iter();
+    while let Some(arg) = iter.next() {
         if arg == "test" {
-            if let Some(path) = args.next() {
+            if let Some(path) = iter.next() {
                 manifest_path_str = path;
             }
         } else if !arg.starts_with("--") {
@@ -297,6 +424,37 @@ async fn main() -> Result<()> {
     let manifest_path = Path::new(&manifest_path_str);
     if !manifest_path.exists() {
         anyhow::bail!("Path {:?} not found.", manifest_path);
+    }
+
+    // --print-egress-plan (F3): report the outbound data path for a manifest
+    // without executing anything. Runs before any container starts.
+    if print_egress_plan {
+        let content = fs::read_to_string(manifest_path)
+            .with_context(|| format!("Failed to read {:?}", manifest_path))?;
+        let m: manifest::PlasticityManifest = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {:?}", manifest_path))?;
+        let handling = m
+            .optimization
+            .data
+            .as_ref()
+            .map(|d| egress::DataHandling {
+                data_class: d.data_class,
+                egress: d.egress.clone(),
+            })
+            .unwrap_or_default();
+        let has_llm_evaluators = m
+            .evaluators
+            .iter()
+            .any(|e| e.r#type == manifest::EvaluatorType::Llm);
+        print!(
+            "{}",
+            egress::render_egress_plan(
+                &handling,
+                &m.optimization.meta_llm.provider,
+                has_llm_evaluators
+            )
+        );
+        return Ok(());
     }
 
     let mut queue = Vec::new();
@@ -335,6 +493,8 @@ async fn main() -> Result<()> {
     // Set when a manifest's regression_guard policy is `block` and a regression
     // was seen: the patch is withheld entirely rather than annotated.
     let mut blocked_patch = false;
+    // Protected rules the optimizer tried to change (F2).
+    let mut quarantined_rules: Vec<rules::QuarantinedChange> = Vec::new();
 
     let mut waterfall_restarts = 0;
     let max_restarts = queue.len() * 3; // Prevent infinite loops
@@ -363,6 +523,7 @@ async fn main() -> Result<()> {
             let passed = run.passed;
             let epochs_taken = run.epochs_taken;
             let report = run.report;
+            quarantined_rules.extend(run.quarantined);
             final_manifest = Some(run.manifest);
 
             // Evaluate every regression-related fact before `report` is moved
@@ -462,13 +623,16 @@ async fn main() -> Result<()> {
         let target_rules_file = Path::new(&manifest.optimization.target_rules_file);
         if target_rules_file.exists() {
             if let Ok(content) = fs::read_to_string(target_rules_file) {
-                if let Ok(rules) = serde_json::from_str::<Vec<String>>(&content) {
-                    if !rules.is_empty() {
+                // Accept both bare strings and classified objects (F2).
+                if let Ok(parsed) = rules::parse_rules(&content) {
+                    let rule_texts = rules::rule_texts(&parsed);
+                    if !rule_texts.is_empty() {
                         let patch_doc = patch::render_patch(
                             &manifest.name,
                             &outcome,
                             final_report.as_ref(),
-                            &rules,
+                            &rule_texts,
+                            &quarantined_rules,
                         );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");
