@@ -39,6 +39,8 @@ struct ManifestRun {
     rule_units: Vec<Option<String>>,
     /// Digests of the inputs this run was derived from (F8).
     patch_provenance: fingerprint::PatchProvenance,
+    /// Grader agreement, when a quorum was used (F4b).
+    agreement: Vec<evaluator::Agreement>,
     /// Set when the run stopped on a budget limit (F7).
     budget_halt: Option<String>,
 }
@@ -158,6 +160,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
     let mut failing_unit: Option<String> = None;
     // Which unit each generated rule addresses, aligned with rule order.
     let mut rule_units: Vec<Option<String>> = Vec::new();
+    // Grader agreement figures, when a quorum was used (F4b).
+    let mut agreement: Vec<evaluator::Agreement> = Vec::new();
 
     // Counts epochs actually run, so a budget halt does not report the
     // configured maximum as if it had been reached.
@@ -300,6 +304,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
             }
             final_results = outcomes;
             provenance.extend(eval_result.provenance.iter().cloned());
+            agreement.extend(eval_result.agreement.iter().copied());
 
             println!(
                 "Score: {:.2} (Threshold: {:.2})",
@@ -350,6 +355,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 blocked_by_regression: false,
                 quarantined,
                 provenance,
+                agreement: agreement.clone(),
                 patch_provenance: fingerprint::PatchProvenance {
                     result_rules_digest,
                     transcript_digest: transcript.as_ref().map(|t| t.digest()),
@@ -552,6 +558,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         transcript,
         rule_units,
         patch_provenance,
+        agreement,
         budget_halt,
         report,
         manifest,
@@ -793,6 +800,8 @@ async fn main() -> Result<()> {
     let mut rule_units: Vec<Option<String>> = Vec::new();
     // Whether this patch still applies to its target (F8).
     let mut patch_provenance: Option<fingerprint::PatchProvenance> = None;
+    // Grader agreement figures, when a quorum was used (F4b).
+    let mut verdict_agreement: Vec<evaluator::Agreement> = Vec::new();
     // How each grader verdict was produced, for re-verifiability (F4a).
     let mut verdict_provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
 
@@ -829,6 +838,7 @@ async fn main() -> Result<()> {
                 final_transcript = Some(t);
             }
             patch_provenance = Some(run.patch_provenance);
+            verdict_agreement.extend(run.agreement);
             rule_units.extend(run.rule_units);
             if let Some(reason) = run.budget_halt {
                 run_budget_halt.get_or_insert(reason);
@@ -951,6 +961,7 @@ async fn main() -> Result<()> {
                             final_transcript.as_ref(),
                             &rule_units,
                             patch_provenance.as_ref(),
+                            &verdict_agreement,
                         );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");

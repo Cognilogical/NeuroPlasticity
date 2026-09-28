@@ -288,6 +288,37 @@ pub struct Evaluator {
     /// transcript alone, so invariants stay deterministic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assert: Option<String>,
+    /// Additional graders for this evaluator (F4b). Empty means a single grader
+    /// using `optimization.meta_llm`, which is the pre-existing behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graders: Vec<GraderSpec>,
+}
+
+/// A grader's role in a quorum (F4b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GraderRole {
+    /// Decides the verdict.
+    #[default]
+    Primary,
+    /// Can veto a PASS into INDETERMINATE, but cannot assert a PASS.
+    Veto,
+    /// Recorded for agreement statistics; does not affect the verdict.
+    Audit,
+}
+
+/// One member of a grader quorum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraderSpec {
+    pub name: String,
+    #[serde(default)]
+    pub role: GraderRole,
+    /// Overrides `optimization.meta_llm` for this grader, so a quorum can mix a
+    /// strong hosted model with a cheap local one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_llm: Option<MetaLlmConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// Whether an evaluator judges a single outcome or a cross-cutting property.

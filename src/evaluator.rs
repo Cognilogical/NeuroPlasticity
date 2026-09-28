@@ -1,5 +1,7 @@
 use crate::llm_client::{CompletionSpec, ask_llm_json};
-use crate::manifest::{Evaluator, EvaluatorKind, EvaluatorType, MetaLlmConfig, Sandbox};
+use crate::manifest::{
+    Evaluator, EvaluatorKind, EvaluatorType, GraderRole, MetaLlmConfig, Sandbox,
+};
 use anyhow::Result;
 use futures::future::join_all;
 use std::path::Path;
@@ -112,6 +114,8 @@ pub struct EvaluationResult {
     pub details: Vec<EvaluatorScore>,
     /// How each LLM verdict was produced, for re-verification (F4a).
     pub provenance: Vec<VerdictProvenance>,
+    /// Agreement between graders, when a quorum was used (F4b).
+    pub agreement: Vec<Agreement>,
 }
 
 pub async fn evaluate(
@@ -141,6 +145,8 @@ pub async fn evaluate(
     let infra_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     // Verdict provenance for re-verifiability (F4a).
     let provenance: Arc<Mutex<Vec<VerdictProvenance>>> = Arc::new(Mutex::new(Vec::new()));
+    // Grader agreement, when a quorum is used (F4b).
+    let agreement: Arc<Mutex<Vec<Agreement>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn each evaluator into an asynchronous task so they execute in parallel
     for eval in evaluators {
@@ -152,6 +158,7 @@ pub async fn evaluate(
         let sys_sem_clone = Arc::clone(&system_semaphore);
         let infra_errors_clone = Arc::clone(&infra_errors);
         let provenance_clone = Arc::clone(&provenance);
+        let agreement_clone = Arc::clone(&agreement);
         // Cloned so the spawned task owns it; `tokio::spawn` requires 'static.
         let data_handling = data_handling.clone();
         let transcript = transcript.cloned();
@@ -422,6 +429,175 @@ pub async fn evaluate(
                                     json_schema: Some(verdict_schema()),
                                 };
 
+                                // F4b: with a quorum, ask each grader and combine.
+                                // With none, this is the single pre-existing grader.
+                                if !eval_clone.graders.is_empty() {
+                                    let mut votes: Vec<(GraderRole, Verdict)> = Vec::new();
+                                    let mut audit: Vec<String> = Vec::new();
+                                    for grader in &eval_clone.graders {
+                                        if let Err(e) = crate::egress::enforce_egress(
+                                            &data_handling,
+                                            &grader
+                                                .meta_llm
+                                                .as_ref()
+                                                .unwrap_or(&meta_llm_clone)
+                                                .provider,
+                                            crate::egress::EgressKind::Grader,
+                                        ) {
+                                            infra_errors_clone.lock().unwrap().push(format!(
+                                                "LLM evaluator '{}' grader '{}': {}",
+                                                eval_clone.name, grader.name, e
+                                            ));
+                                            return EvaluatorScore {
+                                                name: eval_clone.name.clone(),
+                                                success: false,
+                                                weight: eval_clone.weight,
+                                                output: Some(format!("Egress Error: {}", e)),
+                                                attributed_unit: None,
+                                            };
+                                        }
+                                        let cfg = grader
+                                            .meta_llm
+                                            .clone()
+                                            .unwrap_or_else(|| meta_llm_clone.clone());
+                                        let gspec = CompletionSpec {
+                                            system_prompt,
+                                            user_prompt: &user_prompt,
+                                            json_schema: Some(verdict_schema()),
+                                        };
+                                        match ask_llm_json(&cfg, &gspec).await {
+                                            Ok(v) => {
+                                                let raw = v
+                                                    .get("verdict")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or_default();
+                                                match Verdict::parse(raw) {
+                                                    Some(parsed) => {
+                                                        provenance_clone.lock().unwrap().push(
+                                                            VerdictProvenance {
+                                                                provider: cfg.provider.clone(),
+                                                                model: cfg.model.clone(),
+                                                                base_url: cfg.base_url.clone(),
+                                                                api_style: cfg.api_style.clone(),
+                                                                temperature: cfg
+                                                                    .temperature
+                                                                    .unwrap_or(0.0),
+                                                                prompt_hash: hash_prompt(
+                                                                    system_prompt,
+                                                                    prompt,
+                                                                ),
+                                                                verdict: parsed,
+                                                            },
+                                                        );
+                                                        if grader.role == GraderRole::Audit {
+                                                            audit.push(format!(
+                                                                "{}={}",
+                                                                grader.name,
+                                                                parsed.label()
+                                                            ));
+                                                        } else {
+                                                            votes.push((grader.role, parsed));
+                                                        }
+                                                    }
+                                                    None => {
+                                                        infra_errors_clone.lock().unwrap().push(
+                                                            format!(
+                                                                "LLM evaluator '{}' grader '{}' returned an unusable verdict ({:?})",
+                                                                eval_clone.name, grader.name, raw
+                                                            ),
+                                                        );
+                                                        return EvaluatorScore {
+                                                            name: eval_clone.name.clone(),
+                                                            success: false,
+                                                            weight: eval_clone.weight,
+                                                            output: Some(format!(
+                                                                "Unusable verdict from grader '{}': {:?}",
+                                                                grader.name, raw
+                                                            )),
+                                                            attributed_unit: None,
+                                                        };
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                infra_errors_clone.lock().unwrap().push(format!(
+                                                    "LLM evaluator '{}' grader '{}': {}",
+                                                    eval_clone.name, grader.name, e
+                                                ));
+                                                return EvaluatorScore {
+                                                    name: eval_clone.name.clone(),
+                                                    success: false,
+                                                    weight: eval_clone.weight,
+                                                    output: Some(format!(
+                                                        "LLM Error (grader '{}'): {}",
+                                                        grader.name, e
+                                                    )),
+                                                    attributed_unit: None,
+                                                };
+                                            }
+                                        }
+                                    }
+
+                                    // Agreement across the decisive graders.
+                                    if votes.len() >= 2 {
+                                        let seq: Vec<Verdict> =
+                                            votes.iter().map(|(_, v)| *v).collect();
+                                        let a = cohens_kappa(&seq[..1], &seq[1..]);
+                                        let mut agreement = a;
+                                        if votes.len() > 2 {
+                                            let b = cohens_kappa(&seq[..2], &seq[2..]);
+                                            agreement = Agreement {
+                                                pairs: a.pairs + b.pairs,
+                                                raw: (a.raw * a.pairs as f64
+                                                    + b.raw * b.pairs as f64)
+                                                    / (a.pairs + b.pairs) as f64,
+                                                kappa: (a.kappa + b.kappa) / 2.0,
+                                                has_variety: a.has_variety || b.has_variety,
+                                            };
+                                        }
+                                        agreement_clone.lock().unwrap().push(agreement);
+                                        if !agreement.is_trustworthy() {
+                                            println!(
+                                                "⚠️  Graders on '{}' agree {:.0}% (κ={:.2}) — at or near chance.",
+                                                eval_clone.name,
+                                                agreement.raw * 100.0,
+                                                agreement.kappa
+                                            );
+                                        }
+                                    }
+
+                                    let (resolved, conflict) = resolve_quorum(&votes);
+                                    score_indeterminate = !resolved.scores_at_all();
+                                    let mut report =
+                                        format!("{} (quorum of {})", resolved.label(), votes.len());
+                                    if let Some(c) = &conflict {
+                                        report.push_str(&format!(" — {}", c));
+                                    }
+                                    if !audit.is_empty() {
+                                        report.push_str(&format!(" — audit: {}", audit.join(", ")));
+                                    }
+                                    println!(
+                                        "LLM Evaluator '{}' Verdict: {}",
+                                        eval_clone.name, report
+                                    );
+                                    return EvaluatorScore {
+                                        name: eval_clone.name.clone(),
+                                        success: resolved.scores_as_pass(),
+                                        weight: if score_indeterminate {
+                                            0.0
+                                        } else {
+                                            eval_clone.weight
+                                        },
+                                        output: Some(report),
+                                        attributed_unit: eval_clone.unit.clone().filter(|unit| {
+                                            transcript
+                                                .as_ref()
+                                                .and_then(|t| t.step(unit))
+                                                .is_some_and(|s| s.status.is_failure())
+                                        }),
+                                    };
+                                }
+
                                 match ask_llm_json(&meta_llm_clone, &spec).await {
                                     Ok(value) => {
                                         let raw = value
@@ -580,6 +756,7 @@ pub async fn evaluate(
         threshold: pass_threshold,
         details,
         provenance: provenance.lock().unwrap().clone(),
+        agreement: agreement.lock().unwrap().clone(),
     })
 }
 
@@ -708,6 +885,131 @@ fn evaluate_invariant(
     }
 }
 
+/// Agreement between two graders on a set of binary verdicts (F4b).
+///
+/// Raw agreement alone is misleading: two graders that both answer PASS to
+/// everything agree 100% of the time while being useless, so Cohen's κ is
+/// reported as well, since it corrects for chance agreement given the label
+/// distribution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Agreement {
+    pub pairs: usize,
+    pub raw: f64,
+    pub kappa: f64,
+    /// Whether both PASS and FAIL actually occurred. Agreement measured on a
+    /// single label carries no information: two graders that only ever say PASS
+    /// agree perfectly and are both useless.
+    pub has_variety: bool,
+}
+
+impl Agreement {
+    /// κ at or below this means the graders are not better than chance.
+    pub fn is_trustworthy(&self) -> bool {
+        self.pairs >= 2 && self.kappa > 0.4 && self.has_variety
+    }
+}
+
+/// Cohen's κ for two binary labellers over paired observations.
+pub fn cohens_kappa(a: &[Verdict], b: &[Verdict]) -> Agreement {
+    let pairs = a.len().min(b.len());
+    if pairs == 0 {
+        return Agreement {
+            pairs: 0,
+            raw: 0.0,
+            kappa: 0.0,
+            has_variety: false,
+        };
+    }
+    let mut agree = 0usize;
+    let (mut a_pass, mut b_pass) = (0usize, 0usize);
+    let mut saw_pass = false;
+    let mut saw_fail = false;
+    for i in 0..pairs {
+        let (x, y) = (a[i], b[i]);
+        if x == y {
+            agree += 1;
+        }
+        if x == Verdict::Pass {
+            a_pass += 1;
+        }
+        if y == Verdict::Pass {
+            b_pass += 1;
+        }
+        if x == Verdict::Pass || y == Verdict::Pass {
+            saw_pass = true;
+        }
+        if x == Verdict::Fail || y == Verdict::Fail {
+            saw_fail = true;
+        }
+    }
+    let p_o = agree as f64 / pairs as f64;
+    let p_e = (a_pass as f64 / pairs as f64) * (b_pass as f64 / pairs as f64)
+        + (1.0 - a_pass as f64 / pairs as f64) * (1.0 - b_pass as f64 / pairs as f64);
+
+    let kappa = if (1.0 - p_e).abs() < f64::EPSILON {
+        // Both graders are constant and identical: perfect by definition, and
+        // κ is undefined. Report the raw agreement.
+        1.0
+    } else {
+        (p_o - p_e) / (1.0 - p_e)
+    };
+
+    Agreement {
+        pairs,
+        raw: p_o,
+        kappa,
+        has_variety: saw_pass && saw_fail,
+    }
+}
+
+/// Combine a quorum's verdicts into one (F4b).
+///
+/// A `veto` grader can turn a PASS into INDETERMINATE, but cannot assert a
+/// PASS on its own. Any disagreement between a primary and a veto is
+/// INDETERMINATE rather than FAIL: two graders disagreeing is not evidence the
+/// artifact is wrong, and treating it as a failure is how noise becomes a rule.
+pub fn resolve_quorum(verdicts: &[(GraderRole, Verdict)]) -> (Verdict, Option<String>) {
+    let primary = verdicts
+        .iter()
+        .find(|(role, _)| *role == GraderRole::Primary)
+        .or_else(|| verdicts.iter().find(|(role, _)| *role != GraderRole::Audit))
+        .map(|(_, v)| *v);
+
+    let Some(primary) = primary else {
+        return (
+            Verdict::Indeterminate,
+            Some("quorum produced no decisive verdict".to_string()),
+        );
+    };
+
+    for (role, verdict) in verdicts {
+        if *role == GraderRole::Veto {
+            // A veto can only withhold agreement, never assert. It can turn a
+            // PASS into INDETERMINATE; a PASS from a veto is simply ignored.
+            if *verdict == Verdict::Fail && primary == Verdict::Pass {
+                return (
+                    Verdict::Indeterminate,
+                    Some("a veto grader disagreed with the primary PASS".to_string()),
+                );
+            }
+            continue;
+        }
+        // Two primary graders disagreeing outright.
+        if *role != GraderRole::Audit
+            && *verdict != primary
+            && primary != Verdict::Indeterminate
+            && *verdict != Verdict::Indeterminate
+        {
+            return (
+                Verdict::Indeterminate,
+                Some("quorum graders disagreed".to_string()),
+            );
+        }
+    }
+
+    (primary, None)
+}
+
 /// Stable hash of a grader's instruction, so a verdict can be traced to the
 /// prompt that produced it.
 fn hash_prompt(system_prompt: &str, user_prompt: &str) -> String {
@@ -743,6 +1045,7 @@ mod tests {
             unit: unit.map(str::to_string),
             kind: EvaluatorKind::Invariant,
             assert: Some(assert.to_string()),
+            graders: Vec::new(),
         }
     }
 
@@ -870,5 +1173,101 @@ mod tests {
         ));
         assert!(t.step("s1").is_some_and(|s| !s.status.is_failure()));
         assert!(t.step("s2").is_some_and(|s| s.status.is_failure()));
+    }
+}
+
+#[cfg(test)]
+mod quorum_tests {
+    use super::*;
+
+    const P: Verdict = Verdict::Pass;
+    const F: Verdict = Verdict::Fail;
+    const I: Verdict = Verdict::Indeterminate;
+
+    #[test]
+    fn a_single_primary_decides() {
+        let (v, conflict) = resolve_quorum(&[(GraderRole::Primary, P)]);
+        assert_eq!(v, P);
+        assert!(conflict.is_none());
+    }
+
+    /// The core property: disagreement is undecidable, not a failure.
+    #[test]
+    fn disagreeing_graders_yield_indeterminate_not_fail() {
+        let (v, conflict) = resolve_quorum(&[(GraderRole::Primary, P), (GraderRole::Veto, F)]);
+        assert_eq!(v, I, "two graders disagreeing is not evidence of failure");
+        assert!(conflict.is_some());
+    }
+
+    #[test]
+    fn a_veto_cannot_assert_a_pass() {
+        let (v, _) = resolve_quorum(&[(GraderRole::Primary, F), (GraderRole::Veto, P)]);
+        assert_eq!(v, F, "a veto cannot turn a FAIL into a PASS");
+    }
+
+    #[test]
+    fn a_veto_agreeing_with_a_fail_is_a_fail() {
+        let (v, _) = resolve_quorum(&[(GraderRole::Primary, F), (GraderRole::Veto, F)]);
+        assert_eq!(v, F);
+    }
+
+    #[test]
+    fn audit_graders_do_not_affect_the_verdict() {
+        let (v, conflict) = resolve_quorum(&[(GraderRole::Primary, P), (GraderRole::Audit, F)]);
+        assert_eq!(v, P, "an audit grader must not change the outcome");
+        assert!(conflict.is_none());
+    }
+
+    /// Real signal, not chance: the two graders agree far more than the label
+    /// distribution predicts.
+    #[test]
+    fn agreement_beyond_chance_scores_high_kappa() {
+        // Both label everything PASS except the same one, so agreement is 3/4
+        // while chance agreement is (0.75 * 0.75) + (0.25 * 0.25) = 0.625.
+        let a = cohens_kappa(&[P, P, P, F], &[P, P, P, F]);
+        assert_eq!(a.raw, 1.0);
+        assert!(a.kappa > 0.9, "κ={}", a.kappa);
+        assert!(a.is_trustworthy());
+    }
+
+    /// 50% agreement on a balanced split is exactly chance, so κ is 0 even
+    /// though raw agreement is not zero. This is the case raw agreement hides.
+    #[test]
+    fn chance_level_agreement_has_zero_kappa_despite_half_raw() {
+        let a = cohens_kappa(&[P, F, P, F], &[P, F, F, P]);
+        assert_eq!(a.raw, 0.5);
+        assert!(a.kappa.abs() < 0.01, "κ={}", a.kappa);
+    }
+
+    /// Two graders that always say the same thing agree 100% while being
+    /// useless — the reason κ is reported alongside raw agreement.
+    #[test]
+    fn constant_identical_graders_are_flagged_as_untrustworthy() {
+        let a = cohens_kappa(&[P, P, P, P], &[P, P, P, P]);
+        assert_eq!(a.raw, 1.0);
+        assert!(
+            !a.is_trustworthy(),
+            "100% raw agreement on a constant label carries no information"
+        );
+    }
+
+    #[test]
+    fn a_single_observation_is_not_trustworthy() {
+        let a = cohens_kappa(&[P], &[P]);
+        assert!(!a.is_trustworthy());
+    }
+
+    #[test]
+    fn disagreeing_graders_have_low_kappa() {
+        let a = cohens_kappa(&[P, P, F, F], &[F, F, P, P]);
+        assert_eq!(a.raw, 0.0);
+        assert!(a.kappa < 0.5, "κ={}", a.kappa);
+    }
+
+    #[test]
+    fn empty_input_is_not_trustworthy() {
+        let a = cohens_kappa(&[], &[]);
+        assert_eq!(a.pairs, 0);
+        assert!(!a.is_trustworthy());
     }
 }

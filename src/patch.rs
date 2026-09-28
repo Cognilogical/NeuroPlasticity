@@ -246,6 +246,7 @@ pub fn render_patch(
     transcript: Option<&crate::transcript::Transcript>,
     rule_units: &[Option<String>],
     patch_provenance: Option<&crate::fingerprint::PatchProvenance>,
+    agreement: &[crate::evaluator::Agreement],
 ) -> String {
     let mut doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
     doc.push_str(&format!("**Target Project:** `{}`\n", target_project));
@@ -347,6 +348,33 @@ pub fn render_patch(
     if let Some(t) = transcript {
         doc.push_str("### Run transcript\n\n");
         doc.push_str(&t.render_summary());
+        doc.push('\n');
+    }
+
+    if !agreement.is_empty() {
+        doc.push_str("### Grader agreement\n\n");
+        let mut untrustworthy = false;
+        for a in agreement {
+            doc.push_str(&format!(
+                "- {} comparison(s): {:.0}% raw agreement, κ = {:.2}{}\n",
+                a.pairs,
+                a.raw * 100.0,
+                a.kappa,
+                if a.is_trustworthy() {
+                    ""
+                } else {
+                    " — **at or near chance, or measured on a single label**"
+                }
+            ));
+            untrustworthy |= !a.is_trustworthy();
+        }
+        if untrustworthy {
+            doc.push_str(
+                "\n⚠️ At least one comparison is not trustworthy. The verdicts behind this patch \
+                 were not produced by graders that demonstrably agree, so treat the rules as \
+                 weaker evidence than usual.\n",
+            );
+        }
         doc.push('\n');
     }
 
@@ -551,6 +579,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(patch.contains("PARTIAL"), "{}", patch);
         assert!(!patch.contains("permanently inject"), "{}", patch);
@@ -572,6 +601,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(partial.contains("outcome: partial"), "{}", partial);
         assert!(partial.contains("rules_verified: false"), "{}", partial);
@@ -591,6 +621,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(regressed.contains("outcome: regressed"), "{}", regressed);
         assert!(regressed.contains("rules_verified: false"), "{}", regressed);
@@ -605,6 +636,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(verified.contains("outcome: verified"), "{}", verified);
         assert!(verified.contains("rules_verified: true"), "{}", verified);
@@ -628,6 +660,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(
             patch.contains("regressed_evaluator: host_bash: no secrets"),
@@ -650,6 +683,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
 
         // Every `###` heading must be a real section, never a table row.
@@ -678,6 +712,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(verified.contains("### Verified rules"), "{}", verified);
         assert!(!verified.contains("### Proposed rules"), "{}", verified);
@@ -695,6 +730,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(partial.contains("### Proposed rules"), "{}", partial);
         assert!(!partial.contains("### Verified rules"), "{}", partial);
@@ -714,6 +750,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(!patch.contains("permanently inject"), "{}", patch);
         assert!(!patch.contains("#### Rule"), "{}", patch);
@@ -760,6 +797,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(patch.contains("### Grader provenance"), "{}", patch);
         assert!(patch.contains("custom/gpt-5.5"), "{}", patch);
@@ -789,6 +827,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(
             patch.contains("quarantined_rule: Never disclose credentials"),
@@ -869,6 +908,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(patch.contains("outcome: regressed"), "{}", patch);
         assert!(patch.contains("rules_verified: false"), "{}", patch);
@@ -916,6 +956,7 @@ mod tests {
             None,
             &[],
             None,
+            &[],
         );
         assert!(
             patch.contains("| `host_bash: no secrets` | PASS | FAIL | **REGRESSION** |"),

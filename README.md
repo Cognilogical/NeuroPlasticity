@@ -30,13 +30,14 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Noisy Graders Can't Write Rules:** A grader may answer `INDETERMINATE` when a document is undecidable. That verdict is excluded from scoring and halts the run rather than becoming a rule, and every verdict is recorded with its model, endpoint, and prompt hash so a patch decision stays re-verifiable.
 *   **Attributable Failures & Cross-Cutting Invariants:** Agents can emit a JSON-lines run transcript, which lets a failure be pinned to one step (so the rule written for it is scoped, not global) and lets you assert properties that span a whole run — "never books after a failed lookup", "at most one booking" — which unit-style tests cannot reach.
 *   **Re-verifiable Patches:** Patches record digests of the manifest, evaluators, and target rules they came from. `verify-patch` refuses to re-verify a target whose prompt has drifted, rather than reporting a result for a different artifact.
+*   **Grader Quorums:** An `llm` evaluator can declare several graders with `primary` / `veto` / `audit` roles. Disagreement yields `INDETERMINATE` rather than `FAIL`, and agreement is reported as raw % and Cohen's κ — because graders that always agree can still be useless.
 *   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run a 4-bit `Qwen3` model directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads; the candidate list is editable at `~/.config/NeuroPlasticity/models.json`. Prompts are assembled with the chat template embedded in each GGUF, so non-Qwen models are not silently mis-prompted. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
 *   **Release binaries include the offline engine:** The published artifacts are built with `--features embedded-llm`, and CI asserts the engine is actually present before uploading. Builds without that flag compile successfully but abort at runtime on `provider: "embedded"`, so the check is enforced rather than documented.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
 *   **Tri-State Evaluators:** Evaluate your agents exactly how you need:
     1. `host_bash`: Fast, lightweight POSIX shell commands running locally.
     2. `container`: Isolated evaluation containers for heavy dependencies (Node.js, `pytest`, etc.) without host pollution.
-    3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL"|"INDETERMINATE", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted. An `INDETERMINATE` is excluded from scoring and halts the run rather than becoming a rule.
+    3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL"|"INDETERMINATE", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted, optionally across a quorum of graders. An `INDETERMINATE` is excluded from scoring and halts the run rather than becoming a rule.
 
 ## ⚡ How It Works
 
@@ -356,7 +357,49 @@ A violation names the **transition** that broke it (`s1 → s2`), not just the r
 
 Note that `no_action_after_failure` compares ordering, not kinds — a `book` after a `lookup` failure violates it even though the kinds differ, which is the case a naive kind check would miss.
 
-### 8. Patch Provenance & Re-verification
+### 8. Grader Quorum & Agreement
+
+One grader is one noisy oracle. An `llm` evaluator can declare several, each with a role:
+
+```json
+{
+  "name": "tone is warm",
+  "type": "llm",
+  "target_file": "out.txt",
+  "prompt": "Fail if it uses first-person pronouns.",
+  "graders": [
+    { "name": "gpt-5.5", "role": "primary",
+      "meta_llm": { "provider": "custom", "model": "gpt-5.5",
+                    "base_url": "https://opencode.ai/zen/v1/responses",
+                    "api_key_env": "OPENCODE_API_KEY" } },
+    { "name": "local",  "role": "veto",
+      "meta_llm": { "provider": "embedded", "model": "qwen-local" } }
+  ]
+}
+```
+
+| Role | Authority |
+|---|---|
+| `primary` | Decides the verdict |
+| `veto` | Can withhold agreement from a `PASS`, turning it into `INDETERMINATE`. **Cannot** assert a `PASS` |
+| `audit` | Recorded for agreement statistics only; never changes the outcome |
+
+Omitting `graders` gives the single grader using `optimization.meta_llm` — unchanged behavior. Each grader may override the model, so a quorum can pair a strong hosted model with a cheap local one.
+
+**Disagreement is `INDETERMINATE`, never `FAIL`.** Two graders disagreeing is not evidence the artifact is wrong, and treating it as a failure is how noise becomes a rule.
+
+Agreement is reported as raw percentage *and* Cohen's κ, because raw agreement alone is misleading — two graders that always say `PASS` agree 100% and are both useless. A comparison is only treated as trustworthy when κ > 0.4 **and** both labels actually occurred:
+
+```
+### Grader agreement
+
+- 1 comparison(s): 100% raw agreement, κ = 1.00 — **at or near chance, or measured on a single label**
+
+⚠️ At least one comparison is not trustworthy. The verdicts behind this patch were not
+produced by graders that demonstrably agree, so treat the rules as weaker evidence than usual.
+```
+
+### 9. Patch Provenance & Re-verification
 
 A patch is prose rules with no way to tell whether they still apply. If the target's prompt has drifted since the run, re-applying it can reintroduce a fix that is now wrong. Every patch therefore records what it was derived from:
 
@@ -395,7 +438,7 @@ Refusing is the point: re-running the evaluators against drifted rules would rep
 
 A patch predating provenance has nothing to compare against and says so rather than passing silently. Exit code `3` means drift.
 
-### 9. Chained Evaluators & Preventing Regressions
+### 10. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

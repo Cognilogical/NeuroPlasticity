@@ -332,6 +332,43 @@
             "type": "string",
             "enum": ["no_action_after_failure", "at_most_once", "no_failed_steps"],
             "description": "Required when kind is 'invariant'. Restricted to properties decidable from the ordered transcript alone, so invariants stay deterministic."
+          },
+          "graders": {
+            "type": "array",
+            "description": "Optional grader quorum. Empty means a single grader using `optimization.meta_llm`, which is the default. Two graders disagreeing yields INDETERMINATE, not FAIL.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "role": {
+                  "type": "string",
+                  "enum": ["primary", "veto", "audit"],
+                  "description": "primary decides; veto can withhold agreement from a PASS but cannot assert one; audit is recorded for agreement statistics only."
+                },
+                "meta_llm": {
+                  "type": "object",
+                  "description": "Overrides optimization.meta_llm for this grader, so a quorum can mix a strong hosted model with a cheap local one.",
+                  "properties": {
+                    "provider": { "type": "string", "enum": ["custom", "embedded"] },
+                    "model": { "type": "string" },
+                    "base_url": { "type": "string" },
+                    "api_key_env": { "type": "string" },
+                    "model_path": { "type": "string" },
+                    "temperature": { "type": "number" },
+                    "max_tokens": { "type": "integer" },
+                    "api_style": { "type": "string", "enum": ["chat_completions", "responses"] }
+                  },
+                  "required": ["model"],
+                  "additionalProperties": false
+                },
+                "prompt": {
+                  "type": "string",
+                  "description": "Grading criterion for this grader, if it should differ from the evaluator's own prompt."
+                }
+              },
+              "required": ["name"],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
