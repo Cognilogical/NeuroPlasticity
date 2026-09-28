@@ -188,6 +188,8 @@ An attempted change to a protected rule is reverted and reported for human sign-
 10. **The Fast-Path Cache:** NeuroPlasticity hashes your test configuration (command, model, provider, endpoint, active rules). If you run a test that previously failed with the exact same rules, the orchestrator will instantly skip the 120s execution and reload the cached failure logs. Don't be surprised if your test returns in 0.1 seconds! Because this caches *failures*, changing the model or endpoint also invalidates the cache — which is correct, since a different backend is a different grader.
 11. **The Feedback Loop & The Patch:** If you fail Epoch 1, the Meta-Optimizer writes a new rule to `.neuroplasticity/rules.json`. In your `agent_command`, read this file and inject it into your prompt so you learn from your mistakes in Epoch 2! Rules are validated before they are written: `Rule:` prefixes and markdown fences are stripped, rules longer than 400 characters are rejected, and a rule that repeats an existing one aborts the run. Once the run finishes, NeuroPlasticity writes `neuroplasticity_patch.md`.
 
+12. **Check a patch still applies before you re-apply it.** Every patch records digests of the manifest, the evaluator set, and the target rules it was derived from. Before re-running against a target that may have changed, check with `neuroplasticity verify-patch <patch> <manifest>`; it **refuses** (exit 3) when the target's rules no longer match, because a re-run would then describe a different prompt than the patch claims. Pass `--allow-drift` only if you have reviewed the drift and want the result anyway.
+
 **Read the patch status before applying it.** The header states what actually happened, and it is derived from the run rather than assumed:
 
 - `✅ Verified` — every evaluator passed; the rules are earned, apply them to your system prompt or `AGENTS.md`.
@@ -196,6 +198,7 @@ An attempted change to a protected rule is reverted and reported for human sign-
 The run also exits non-zero (code 2) when the outcome is not clean, so CI will catch it.
 
 Set `"regression_guard": { "policy": "block" }` in `optimization` if you would rather have no patch written at all when a regression appears.
+
 
 **Your Next Step:**
 Acknowledge these instructions to the user, assess the specific task the user wants you to optimize yourself for, and generate the `plasticity.json` in their repository.

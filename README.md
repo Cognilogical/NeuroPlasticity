@@ -28,6 +28,8 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Honest Artifacts:** The patch header states what actually happened, derived from the run rather than hardcoded. A failed or regressed run never claims its rules were verified, and never instructs you to inject them.
 *   **Protected Rules & Data Egress (opt-in):** Mark safety/compliance rules immutable to the optimizer — they are hidden from it and any attempted change is quarantined for human sign-off. Declare a data class to control which providers may receive your material, with `--print-egress-plan` to inspect the outbound path before a run.
 *   **Noisy Graders Can't Write Rules:** A grader may answer `INDETERMINATE` when a document is undecidable. That verdict is excluded from scoring and halts the run rather than becoming a rule, and every verdict is recorded with its model, endpoint, and prompt hash so a patch decision stays re-verifiable.
+*   **Attributable Failures & Cross-Cutting Invariants:** Agents can emit a JSON-lines run transcript, which lets a failure be pinned to one step (so the rule written for it is scoped, not global) and lets you assert properties that span a whole run — "never books after a failed lookup", "at most one booking" — which unit-style tests cannot reach.
+*   **Re-verifiable Patches:** Patches record digests of the manifest, evaluators, and target rules they came from. `verify-patch` refuses to re-verify a target whose prompt has drifted, rather than reporting a result for a different artifact.
 *   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run a 4-bit `Qwen3` model directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads; the candidate list is editable at `~/.config/NeuroPlasticity/models.json`. Prompts are assembled with the chat template embedded in each GGUF, so non-Qwen models are not silently mis-prompted. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
 *   **Release binaries include the offline engine:** The published artifacts are built with `--features embedded-llm`, and CI asserts the engine is actually present before uploading. Builds without that flag compile successfully but abort at runtime on `provider: "embedded"`, so the check is enforced rather than documented.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
@@ -354,7 +356,46 @@ A violation names the **transition** that broke it (`s1 → s2`), not just the r
 
 Note that `no_action_after_failure` compares ordering, not kinds — a `book` after a `lookup` failure violates it even though the kinds differ, which is the case a naive kind check would miss.
 
-### 8. Chained Evaluators & Preventing Regressions
+### 8. Patch Provenance & Re-verification
+
+A patch is prose rules with no way to tell whether they still apply. If the target's prompt has drifted since the run, re-applying it can reintroduce a fix that is now wrong. Every patch therefore records what it was derived from:
+
+```
+**Provenance**
+
+- **Manifest hash:** `sha256:5b753fe4…`
+- **Evaluator set hash:** `sha256:938fa742…`
+- **Baseline target rules digest:** `sha256:9c7ca576…`
+- **Resulting target rules digest:** `sha256:9c7ca576…`
+- **Transcript digest:** `sha256:…`          (when the agent emitted one)
+- **Run at:** `2026-09-28T02:40:57Z` · **Finished at:** `2026-09-28T02:40:57Z`
+```
+
+Check it before trusting it again:
+
+```bash
+./neuroplasticity verify-patch neuroplasticity_patch.md plasticity.json
+```
+
+```
+✅ Rules digest matches. This patch still applies to the current target.
+```
+
+```
+🛑 DRIFT DETECTED — refusing to verify.
+The target's rules have changed since this patch was generated, so a re-run would
+describe a different prompt than the one these rules were derived from.
+```
+
+Refusing is the point: re-running the evaluators against drifted rules would report a result for a *different* artifact than the patch describes, which is worse than refusing. Drift can be overridden, but only explicitly:
+
+```bash
+./neuroplasticity verify-patch neuroplasticity_patch.md plasticity.json --allow-drift
+```
+
+A patch predating provenance has nothing to compare against and says so rather than passing silently. Exit code `3` means drift.
+
+### 9. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

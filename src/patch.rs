@@ -245,10 +245,39 @@ pub fn render_patch(
     provenance: &[crate::evaluator::VerdictProvenance],
     transcript: Option<&crate::transcript::Transcript>,
     rule_units: &[Option<String>],
+    patch_provenance: Option<&crate::fingerprint::PatchProvenance>,
 ) -> String {
     let mut doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
     doc.push_str(&format!("**Target Project:** `{}`\n", target_project));
     doc.push_str(&outcome.status_line());
+
+    // F8: whether this patch still applies. A patch is prose rules with no way
+    // to tell whether they are still relevant to the current target.
+    if let Some(p) = patch_provenance {
+        doc.push_str("\n**Provenance**\n\n");
+        doc.push_str(&format!("- **Manifest hash:** `{}`\n", p.manifest_hash));
+        doc.push_str(&format!(
+            "- **Evaluator set hash:** `{}`\n",
+            p.evaluator_set_hash
+        ));
+        doc.push_str(&format!(
+            "- **Baseline target rules digest:** `{}`\n",
+            p.baseline_rules_digest
+        ));
+        doc.push_str(&format!(
+            "- **Resulting target rules digest:** `{}`\n",
+            p.result_rules_digest
+        ));
+        if let Some(t) = &p.transcript_digest {
+            doc.push_str(&format!("- **Transcript digest:** `{}`\n", t));
+        }
+        doc.push_str(&format!("- **Run at:** `{}`\n", p.run_started_at));
+        doc.push_str(&format!("- **Finished at:** `{}`\n", p.run_finished_at));
+        doc.push_str(
+            "\nRe-verify with `neuroplasticity verify-patch <manifest>`; it refuses when the \
+             target's rules no longer match the baseline digest above.\n",
+        );
+    }
     doc.push('\n');
 
     // Machine-readable header so a consumer can filter without parsing prose
@@ -521,6 +550,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(patch.contains("PARTIAL"), "{}", patch);
         assert!(!patch.contains("permanently inject"), "{}", patch);
@@ -541,6 +571,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(partial.contains("outcome: partial"), "{}", partial);
         assert!(partial.contains("rules_verified: false"), "{}", partial);
@@ -559,6 +590,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(regressed.contains("outcome: regressed"), "{}", regressed);
         assert!(regressed.contains("rules_verified: false"), "{}", regressed);
@@ -572,6 +604,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(verified.contains("outcome: verified"), "{}", verified);
         assert!(verified.contains("rules_verified: true"), "{}", verified);
@@ -594,6 +627,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(
             patch.contains("regressed_evaluator: host_bash: no secrets"),
@@ -615,6 +649,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
 
         // Every `###` heading must be a real section, never a table row.
@@ -642,6 +677,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(verified.contains("### Verified rules"), "{}", verified);
         assert!(!verified.contains("### Proposed rules"), "{}", verified);
@@ -658,6 +694,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(partial.contains("### Proposed rules"), "{}", partial);
         assert!(!partial.contains("### Verified rules"), "{}", partial);
@@ -667,7 +704,17 @@ mod tests {
     /// nothing to inject, and the phrasing implies otherwise.
     #[test]
     fn no_rules_means_nothing_to_apply() {
-        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[], &[], None, &[]);
+        let patch = render_patch(
+            "d",
+            &RunOutcome::Verified,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+        );
         assert!(!patch.contains("permanently inject"), "{}", patch);
         assert!(!patch.contains("#### Rule"), "{}", patch);
     }
@@ -712,6 +759,7 @@ mod tests {
             &provenance,
             None,
             &[],
+            None,
         );
         assert!(patch.contains("### Grader provenance"), "{}", patch);
         assert!(patch.contains("custom/gpt-5.5"), "{}", patch);
@@ -740,6 +788,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(
             patch.contains("quarantined_rule: Never disclose credentials"),
@@ -819,6 +868,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(patch.contains("outcome: regressed"), "{}", patch);
         assert!(patch.contains("rules_verified: false"), "{}", patch);
@@ -865,6 +915,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         );
         assert!(
             patch.contains("| `host_bash: no secrets` | PASS | FAIL | **REGRESSION** |"),

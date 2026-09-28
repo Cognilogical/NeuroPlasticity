@@ -37,6 +37,8 @@ struct ManifestRun {
     transcript: Option<transcript::Transcript>,
     /// Which unit each generated rule addresses (F5).
     rule_units: Vec<Option<String>>,
+    /// Digests of the inputs this run was derived from (F8).
+    patch_provenance: fingerprint::PatchProvenance,
     /// Set when the run stopped on a budget limit (F7).
     budget_halt: Option<String>,
 }
@@ -89,6 +91,24 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 .unwrap_or("unset")
         );
     }
+
+    // F8: digests of the inputs this run is derived from, so a later
+    // re-verification can tell whether the patch still applies.
+    let baseline_rules_digest = match fs::read_to_string(&target_rules_file) {
+        Ok(existing) => fingerprint::digest_of(&[&existing]),
+        Err(_) => fingerprint::digest_of(&[""]),
+    };
+    let evaluators_json_for_hash = serde_json::to_string(&manifest.evaluators).unwrap_or_default();
+    let patch_provenance = fingerprint::PatchProvenance {
+        manifest_hash: fingerprint::digest_of(&[&manifest_content]),
+        evaluator_set_hash: fingerprint::digest_of(&[&evaluators_json_for_hash]),
+        baseline_rules_digest,
+        result_rules_digest: String::new(),
+        transcript_digest: None,
+        target_project: manifest.name.clone(),
+        run_started_at: fingerprint::now_iso8601(),
+        run_finished_at: String::new(),
+    };
 
     // Checked before any container starts (F3: fail loud, early).
     egress::enforce_egress(
@@ -321,12 +341,21 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
 
         if pass {
             println!("✅ Epoch {} achieved passing score! Run complete.", epoch);
+            let result_rules_digest = fs::read_to_string(&target_rules_file)
+                .map(|c| fingerprint::digest_of(&[&c]))
+                .unwrap_or_else(|_| fingerprint::digest_of(&[""]));
             return Ok(ManifestRun {
                 passed: true,
                 epochs_taken: epoch as u32,
                 blocked_by_regression: false,
                 quarantined,
                 provenance,
+                patch_provenance: fingerprint::PatchProvenance {
+                    result_rules_digest,
+                    transcript_digest: transcript.as_ref().map(|t| t.digest()),
+                    run_finished_at: fingerprint::now_iso8601(),
+                    ..patch_provenance
+                },
                 transcript,
                 rule_units,
                 budget_halt,
@@ -504,6 +533,16 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         .unwrap_or(false)
         && !report.regressions().is_empty();
 
+    let result_rules_digest = fs::read_to_string(&target_rules_file)
+        .map(|c| fingerprint::digest_of(&[&c]))
+        .unwrap_or_else(|_| fingerprint::digest_of(&[""]));
+    let patch_provenance = fingerprint::PatchProvenance {
+        result_rules_digest,
+        transcript_digest: transcript.as_ref().map(|t| t.digest()),
+        run_finished_at: fingerprint::now_iso8601(),
+        ..patch_provenance
+    };
+
     Ok(ManifestRun {
         passed: false,
         epochs_taken,
@@ -512,9 +551,127 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         provenance,
         transcript,
         rule_units,
+        patch_provenance,
         budget_halt,
         report,
         manifest,
+    })
+}
+
+/// Re-verify that a patch still applies to its target (F8).
+///
+/// A patch is prose rules. If the target's prompt has drifted since the run,
+/// re-applying it can reintroduce a fix that is now wrong — and re-running the
+/// evaluators would report a result for a different artifact than the patch
+/// describes. So the digest is checked first and drift is reported rather than
+/// silently verified. The check is skippable only with an explicit flag.
+fn verify_patch(args: &[String], pos: usize) -> Result<()> {
+    let allow_drift = args.iter().any(|a| a == "--allow-drift");
+    let patch_path = args
+        .get(pos + 1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("neuroplasticity_patch.md"));
+    let manifest_path = args
+        .get(pos + 2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("plasticity.json"));
+
+    if !patch_path.exists() {
+        anyhow::bail!("No patch artifact at {:?}.", patch_path);
+    }
+    let patch = fs::read_to_string(&patch_path)
+        .with_context(|| format!("Failed to read {:?}", patch_path))?;
+
+    let Some(expected) = extract_digest(&patch, "Baseline target rules digest") else {
+        anyhow::bail!(
+            "{:?} carries no baseline rules digest, so it cannot be verified. \
+             Patches produced before provenance was recorded have nothing to compare against.",
+            patch_path
+        );
+    };
+    let manifest_hash = extract_digest(&patch, "Manifest hash");
+    let evaluator_hash = extract_digest(&patch, "Evaluator set hash");
+    let finished_at = extract_digest(&patch, "Finished at");
+
+    println!("Patch:  {:?}", patch_path);
+    println!(
+        "Run:    {} · finished {}",
+        manifest_hash.as_deref().unwrap_or("?"),
+        finished_at.as_deref().unwrap_or("?")
+    );
+    println!("Expected rules digest: {}\n", expected);
+
+    // The manifest is optional for a pure digest comparison.
+    let mut manifest_matches = None;
+    if manifest_path.exists() {
+        let content = fs::read_to_string(&manifest_path)?;
+        let current = fingerprint::digest_of(&[&content]);
+        manifest_matches = Some(current.clone());
+        println!("Manifest digest:      {}", current);
+    }
+
+    let current_rules = if manifest_path.exists() {
+        let content = fs::read_to_string(&manifest_path)?;
+        let parsed: manifest::PlasticityManifest = serde_json::from_str(&content)?;
+        let rules_path = PathBuf::from(&parsed.optimization.target_rules_file);
+        fs::read_to_string(&rules_path).ok()
+    } else {
+        None
+    };
+
+    let drift = fingerprint::check_rules_drift(&expected, current_rules.as_deref());
+
+    if let (Some(expected_manifest), Some(actual_manifest)) =
+        (manifest_hash.as_deref(), manifest_matches.as_deref())
+    {
+        if expected_manifest != actual_manifest {
+            println!("\n⚠️  The manifest itself has changed since this patch was generated.");
+        }
+    }
+    let _ = evaluator_hash;
+
+    if drift.is_match() {
+        println!("\n✅ Rules digest matches. This patch still applies to the current target.");
+        return Ok(());
+    }
+
+    match drift {
+        fingerprint::DigestDrift::Drifted { actual, .. } => {
+            println!("\nCurrent rules digest:  {}", actual);
+            if allow_drift {
+                println!(
+                    "\n⚠️  DRIFT DETECTED, but --allow-drift was passed.\n\
+                     Re-running now would verify a different artifact than this patch describes."
+                );
+                return Ok(());
+            }
+            println!(
+                "\n🛑 DRIFT DETECTED — refusing to verify.\n\
+                 The target's rules have changed since this patch was generated, so a re-run would\n\
+                 describe a different prompt than the one these rules were derived from. Re-applying\n\
+                 the patch could reintroduce a fix that is now wrong.\n\
+                 Review the drift, then pass --allow-drift to verify anyway."
+            );
+            std::process::exit(3);
+        }
+        fingerprint::DigestDrift::Match => unreachable!(),
+    }
+}
+
+/// Pull a `- **Label:** \`value\`` field out of a patch header.
+///
+/// The separator is `:** ` — a plain ": " does not appear, because the value
+/// itself may contain colons (a `sha256:` digest).
+fn extract_digest(patch: &str, label: &str) -> Option<String> {
+    patch.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("- **")?;
+        let (key, value) = rest.split_once(":** ")?;
+        let key = key.trim();
+        if key != label {
+            return None;
+        }
+        let value = value.trim().trim_matches('`').trim();
+        (!value.is_empty()).then(|| value.to_string())
     })
 }
 
@@ -527,19 +684,31 @@ async fn main() -> Result<()> {
     args.next(); // Skip executable name
 
     let mut manifest_path_str = "plasticity.json".to_string();
-    // Collected because std::env::Args is not Clone and the flag is read twice.
+    // Collected because std::env::Args is not Clone and the flags are read twice.
     let raw_args: Vec<String> = args.by_ref().collect();
     let print_egress_plan = raw_args.iter().any(|a| a == "--print-egress-plan");
 
-    let mut iter = raw_args.into_iter();
+    // `verify-patch` (F8): re-check that a patch still applies to its target.
+    // Refuses on digest drift rather than silently verifying a different prompt.
+    if let Some(pos) = raw_args.iter().position(|a| a == "verify-patch") {
+        return verify_patch(&raw_args, pos);
+    }
+
+    let mut iter = raw_args.clone().into_iter();
     while let Some(arg) = iter.next() {
         if arg == "test" {
             if let Some(path) = iter.next() {
                 manifest_path_str = path;
             }
-        } else if !arg.starts_with("--") {
+        } else if !arg.starts_with("--") && arg != "verify-patch" {
             manifest_path_str = arg;
         }
+    }
+
+    // `verify-patch` (F8): refuse when the target's rules have drifted from
+    // what the patch was derived from.
+    if let Some(pos) = raw_args.iter().position(|a| a == "verify-patch") {
+        return verify_patch(&raw_args, pos);
     }
 
     let manifest_path = Path::new(&manifest_path_str);
@@ -622,6 +791,8 @@ async fn main() -> Result<()> {
     let mut final_transcript: Option<transcript::Transcript> = None;
     // Which unit each rule addresses, for the patch (F5).
     let mut rule_units: Vec<Option<String>> = Vec::new();
+    // Whether this patch still applies to its target (F8).
+    let mut patch_provenance: Option<fingerprint::PatchProvenance> = None;
     // How each grader verdict was produced, for re-verifiability (F4a).
     let mut verdict_provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
 
@@ -657,6 +828,7 @@ async fn main() -> Result<()> {
             if let Some(t) = run.transcript {
                 final_transcript = Some(t);
             }
+            patch_provenance = Some(run.patch_provenance);
             rule_units.extend(run.rule_units);
             if let Some(reason) = run.budget_halt {
                 run_budget_halt.get_or_insert(reason);
@@ -767,6 +939,7 @@ async fn main() -> Result<()> {
                 // Accept both bare strings and classified objects (F2).
                 if let Ok(parsed) = rules::parse_rules(&content) {
                     let rule_texts = rules::rule_texts(&parsed);
+
                     if !rule_texts.is_empty() {
                         let patch_doc = patch::render_patch(
                             &manifest.name,
@@ -777,6 +950,7 @@ async fn main() -> Result<()> {
                             &verdict_provenance,
                             final_transcript.as_ref(),
                             &rule_units,
+                            patch_provenance.as_ref(),
                         );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");
@@ -811,4 +985,43 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod provenance_header_tests {
+    use super::extract_digest;
+
+    const PATCH: &str = concat!(
+        "# Patch\n\n",
+        "**Provenance**\n\n",
+        "- **Manifest hash:** `sha256:aaaa`\n",
+        "- **Evaluator set hash:** `sha256:bbbb`\n",
+        "- **Baseline target rules digest:** `sha256:cccc`\n",
+        "- **Run at:** `2026-09-28T02:40:57Z`\n",
+    );
+
+    #[test]
+    fn extracts_a_field_from_the_provenance_header() {
+        assert_eq!(
+            extract_digest(PATCH, "Baseline target rules digest").as_deref(),
+            Some("sha256:cccc")
+        );
+        assert_eq!(
+            extract_digest(PATCH, "Manifest hash").as_deref(),
+            Some("sha256:aaaa")
+        );
+    }
+
+    /// A value containing colons must survive intact.
+    #[test]
+    fn digest_colons_are_not_split() {
+        let got = extract_digest(PATCH, "Run at").unwrap();
+        assert_eq!(got, "2026-09-28T02:40:57Z");
+    }
+
+    #[test]
+    fn absent_field_returns_none() {
+        assert!(extract_digest(PATCH, "Transcript digest").is_none());
+        assert!(extract_digest("no provenance here", "Manifest hash").is_none());
+    }
 }

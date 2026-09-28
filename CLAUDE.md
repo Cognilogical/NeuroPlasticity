@@ -93,4 +93,5 @@ Model configuration lives in exactly one place: `optimization.meta_llm` in `plas
 - **Never emit an unearned claim.** A patch header's status must derive from the run. This is the tool's central trust signal, and the failure mode is worst exactly when it matters.
 - **Attribute before generalizing.** A rule written against a whole-run log is necessarily global. When a failure belongs to one step, scope the rule to that step.
 - **Refuse, don't coerce, and never pass silently.** An unknown invariant, an unusable verdict, or an unreachable endpoint is a loud failure — not a quiet pass.
+- **A patch must be re-verifiable.** Emit the digests of the manifest, evaluators, and target rules. `verify-patch` refuses on drift rather than reporting a result for a different artifact; the override is an explicit flag, never a default.
 - **Platform-agnostic code paths.** Model paths use `shellexpand`/forward slashes; keep runtime branching on `cfg(target_os)` rather than OS checks.
