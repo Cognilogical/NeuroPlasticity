@@ -79,6 +79,9 @@ pub enum RunOutcome {
         manifest: String,
         evaluators: Vec<String>,
     },
+    /// The run stopped on a budget limit, so it never reached a conclusion
+    /// (F7). Not a pass, and not a claim about the rules either.
+    BudgetHalted { reason: String },
 }
 
 impl RunOutcome {
@@ -91,6 +94,7 @@ impl RunOutcome {
             RunOutcome::Verified => "verified",
             RunOutcome::Partial { .. } => "partial",
             RunOutcome::Regressed { .. } => "regressed",
+            RunOutcome::BudgetHalted { .. } => "budget_halted",
         }
     }
 
@@ -119,6 +123,10 @@ impl RunOutcome {
                 "**Status:** ⚠️ REGRESSED — manifest `{manifest}` finished with evaluator(s) that passed at \
                  baseline and now fail: {}. See the evaluator delta table. Do not apply without review.\n",
                 evaluators.join(", ")
+            ),
+            RunOutcome::BudgetHalted { reason } => format!(
+                "**Status:** 🛑 HALTED ON BUDGET — {reason}. The run stopped before it reached a \
+                 conclusion, so nothing here was verified either way.\n"
             ),
         }
     }
@@ -234,6 +242,7 @@ pub fn render_patch(
     report: Option<&ManifestReport>,
     rules: &[String],
     quarantined: &[crate::rules::QuarantinedChange],
+    provenance: &[crate::evaluator::VerdictProvenance],
 ) -> String {
     let mut doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
     doc.push_str(&format!("**Target Project:** `{}`\n", target_project));
@@ -304,6 +313,26 @@ pub fn render_patch(
         doc.push('\n');
     }
 
+    if !provenance.is_empty() {
+        doc.push_str("### Grader provenance\n\n");
+        doc.push_str(
+            "Every verdict above, with the model and prompt that produced it. A patch decision \
+             should be re-verifiable from this record.\n\n",
+        );
+        for p in provenance {
+            doc.push_str(&format!(
+                "- `{}` — verdict `{}`{}\n",
+                p,
+                p.verdict.label(),
+                p.base_url
+                    .as_ref()
+                    .map(|u| format!(" · endpoint `{}`", u))
+                    .unwrap_or_default()
+            ));
+        }
+        doc.push('\n');
+    }
+
     doc.push_str(if outcome.is_verified() {
         "### Verified rules\n\n"
     } else {
@@ -324,6 +353,29 @@ pub fn render_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indeterminate_verdicts_are_distinct_from_fail() {
+        use crate::evaluator::Verdict;
+
+        // INDETERMINATE must not read as a pass, and must not be scored at all
+        // — it is not evidence the agent is wrong.
+        assert!(!Verdict::Indeterminate.scores_as_pass());
+        assert!(!Verdict::Indeterminate.scores_at_all());
+        assert!(Verdict::Fail.scores_at_all());
+        assert!(!Verdict::Fail.scores_as_pass());
+        assert!(Verdict::Pass.scores_as_pass());
+
+        assert_eq!(Verdict::parse("PASS"), Some(Verdict::Pass));
+        assert_eq!(Verdict::parse(" fail "), Some(Verdict::Fail));
+        assert_eq!(
+            Verdict::parse("INDETERMINATE"),
+            Some(Verdict::Indeterminate)
+        );
+        // The old prefix-matching bug: this must not silently pass.
+        assert_eq!(Verdict::parse("PASS fine"), None);
+        assert_eq!(Verdict::parse(""), None);
+    }
 
     fn outcome(name: &str, success: bool) -> EvaluatorOutcome {
         EvaluatorOutcome {
@@ -385,6 +437,26 @@ mod tests {
     }
 
     /// The happy path must not change gratuitously.
+    /// A budget halt is a distinct outcome, not a partial run: the run stopped
+    /// before reaching a conclusion, which is a different claim (F7).
+    #[test]
+    fn budget_halt_is_not_verified() {
+        let outcome = RunOutcome::BudgetHalted {
+            reason: "wall clock 900s exceeded the 300s budget".to_string(),
+        };
+        let status = outcome.status_line();
+        assert!(status.contains("HALTED ON BUDGET"), "{}", status);
+        assert!(!status.contains("✅"), "{}", status);
+        assert!(!outcome.is_verified());
+        assert_eq!(outcome.token(), "budget_halted");
+        assert!(
+            !outcome
+                .application_guidance(1)
+                .contains("permanently inject"),
+            "a halted run has not earned inject advice"
+        );
+    }
+
     #[test]
     fn verified_status_keeps_original_wording() {
         assert_eq!(
@@ -434,6 +506,7 @@ mod tests {
             None,
             &["Do not wrap JSON in fences".to_string()],
             &[],
+            &[],
         );
         assert!(patch.contains("PARTIAL"), "{}", patch);
         assert!(!patch.contains("permanently inject"), "{}", patch);
@@ -451,6 +524,7 @@ mod tests {
             None,
             &["rule one".to_string()],
             &[],
+            &[],
         );
         assert!(partial.contains("outcome: partial"), "{}", partial);
         assert!(partial.contains("rules_verified: false"), "{}", partial);
@@ -466,6 +540,7 @@ mod tests {
             Some(&sample_report()),
             &["rule one".to_string()],
             &[],
+            &[],
         );
         assert!(regressed.contains("outcome: regressed"), "{}", regressed);
         assert!(regressed.contains("rules_verified: false"), "{}", regressed);
@@ -475,6 +550,7 @@ mod tests {
             &RunOutcome::Verified,
             None,
             &["rule one".to_string()],
+            &[],
             &[],
         );
         assert!(verified.contains("outcome: verified"), "{}", verified);
@@ -495,6 +571,7 @@ mod tests {
             Some(&sample_report()),
             &["rule".to_string()],
             &[],
+            &[],
         );
         assert!(
             patch.contains("regressed_evaluator: host_bash: no secrets"),
@@ -512,6 +589,7 @@ mod tests {
             &RunOutcome::Verified,
             Some(&sample_report()),
             &["The only real rule.".to_string()],
+            &[],
             &[],
         );
 
@@ -531,7 +609,14 @@ mod tests {
 
     #[test]
     fn verified_runs_label_the_section_as_verified() {
-        let verified = render_patch("d", &RunOutcome::Verified, None, &["r".to_string()], &[]);
+        let verified = render_patch(
+            "d",
+            &RunOutcome::Verified,
+            None,
+            &["r".to_string()],
+            &[],
+            &[],
+        );
         assert!(verified.contains("### Verified rules"), "{}", verified);
         assert!(!verified.contains("### Proposed rules"), "{}", verified);
 
@@ -544,6 +629,7 @@ mod tests {
             None,
             &["r".to_string()],
             &[],
+            &[],
         );
         assert!(partial.contains("### Proposed rules"), "{}", partial);
         assert!(!partial.contains("### Verified rules"), "{}", partial);
@@ -553,7 +639,7 @@ mod tests {
     /// nothing to inject, and the phrasing implies otherwise.
     #[test]
     fn no_rules_means_nothing_to_apply() {
-        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[]);
+        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[], &[]);
         assert!(!patch.contains("permanently inject"), "{}", patch);
         assert!(!patch.contains("#### Rule"), "{}", patch);
     }
@@ -577,6 +663,37 @@ mod tests {
         );
     }
 
+    /// Every emitted verdict must be reconstructible from recorded provenance.
+    #[test]
+    fn patch_records_grader_provenance() {
+        let provenance = vec![crate::evaluator::VerdictProvenance {
+            provider: "custom".to_string(),
+            model: "gpt-5.5".to_string(),
+            base_url: Some("https://opencode.ai/zen/v1/responses".to_string()),
+            api_style: Some("responses".to_string()),
+            temperature: 0.0,
+            prompt_hash: "abcdef0123456789".to_string(),
+            verdict: crate::evaluator::Verdict::Pass,
+        }];
+        let patch = render_patch(
+            "d",
+            &RunOutcome::Verified,
+            None,
+            &["r".to_string()],
+            &[],
+            &provenance,
+        );
+        assert!(patch.contains("### Grader provenance"), "{}", patch);
+        assert!(patch.contains("custom/gpt-5.5"), "{}", patch);
+        assert!(patch.contains("verdict `PASS`"), "{}", patch);
+        assert!(
+            patch.contains("https://opencode.ai/zen/v1/responses"),
+            "the endpoint must be recorded: {}",
+            patch
+        );
+        assert!(patch.contains("temp=0"), "{}", patch);
+    }
+
     /// Quarantined changes must be visible in the artifact and never described
     /// as improvements.
     #[test]
@@ -590,6 +707,7 @@ mod tests {
                 rule_text: "Never disclose credentials".to_string(),
                 reason: "protected rule was removed or altered by the optimizer".to_string(),
             }],
+            &[],
         );
         assert!(
             patch.contains("quarantined_rule: Never disclose credentials"),
@@ -666,6 +784,7 @@ mod tests {
             Some(&report),
             &["broaden the rule".to_string()],
             &[],
+            &[],
         );
         assert!(patch.contains("outcome: regressed"), "{}", patch);
         assert!(patch.contains("rules_verified: false"), "{}", patch);
@@ -708,6 +827,7 @@ mod tests {
             },
             Some(&sample_report()),
             &["be careful".to_string()],
+            &[],
             &[],
         );
         assert!(

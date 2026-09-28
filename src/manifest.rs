@@ -110,6 +110,106 @@ impl Default for DataPolicy {
     }
 }
 
+/// Ceiling on the resources one run may consume (F7).
+///
+/// All fields optional; omitting `budget` means no cap, matching prior behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Budget {
+    /// Wall-clock seconds for the whole run.
+    #[serde(default)]
+    pub max_wall_clock_seconds: Option<u64>,
+    /// Cumulative spend in USD. Requires a model that reports cost.
+    #[serde(default)]
+    pub max_usd: Option<f64>,
+    /// What to do when a limit is reached.
+    #[serde(default)]
+    pub on_exceed: OnExceed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OnExceed {
+    /// Stop the run and report it as not verified.
+    #[default]
+    Halt,
+    /// Print a warning and keep going.
+    Warn,
+}
+
+/// Tracks spend and elapsed time across a run.
+#[derive(Debug, Clone)]
+pub struct BudgetTracker {
+    budget: Budget,
+    started: std::time::Instant,
+    /// Most recent per-epoch cost in USD, accumulated externally.
+    pub spend_usd: f64,
+    pub halted: bool,
+}
+
+impl BudgetTracker {
+    pub fn new(budget: Budget) -> Self {
+        Self {
+            budget,
+            started: std::time::Instant::now(),
+            spend_usd: 0.0,
+            halted: false,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.budget.max_wall_clock_seconds.is_some() || self.budget.max_usd.is_some()
+    }
+
+    pub fn elapsed_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Record cost incurred this epoch.
+    pub fn add_spend(&mut self, usd: f64) {
+        if usd > 0.0 {
+            self.spend_usd += usd;
+        }
+    }
+
+    /// Which limit, if any, has been reached.
+    pub fn exceeded(&self) -> Option<String> {
+        if let Some(max) = self.budget.max_wall_clock_seconds {
+            let elapsed = self.elapsed_secs();
+            if elapsed > max {
+                return Some(format!(
+                    "wall clock {}s exceeded the {}s budget",
+                    elapsed, max
+                ));
+            }
+        }
+        if let Some(max) = self.budget.max_usd {
+            if self.spend_usd > max {
+                return Some(format!(
+                    "spend ${:.4} exceeded the ${:.2} budget",
+                    self.spend_usd, max
+                ));
+            }
+        }
+        None
+    }
+
+    /// Check the budget, applying `on_exceed`. Returns the reason if the run
+    /// must stop.
+    pub fn check(&mut self) -> Option<String> {
+        let reason = self.exceeded()?;
+        match self.budget.on_exceed {
+            OnExceed::Halt => {
+                self.halted = true;
+                Some(reason)
+            }
+            OnExceed::Warn => {
+                eprintln!("⚠️ Budget exceeded: {}", reason);
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Optimization {
     pub target_rules_file: String,
@@ -125,6 +225,9 @@ pub struct Optimization {
     /// Optional. Absent means unclassified and no egress enforcement (F3).
     #[serde(default)]
     pub data: Option<DataPolicy>,
+    /// Optional. Absent means no cap on spend or time.
+    #[serde(default)]
+    pub budget: Option<Budget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,4 +275,83 @@ pub struct Evaluator {
     pub prompt: Option<String>,
     pub target_file: Option<String>,
     pub weight: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_budget_means_unlimited() {
+        let mut t = BudgetTracker::new(Budget::default());
+        assert!(!t.is_active());
+        assert_eq!(t.exceeded(), None);
+        // Even a large spend is fine when no cap was set.
+        t.add_spend(10_000.0);
+        assert_eq!(t.exceeded(), None);
+    }
+
+    #[test]
+    fn spend_over_the_cap_is_detected() {
+        let mut t = BudgetTracker::new(Budget {
+            max_usd: Some(1.0),
+            ..Default::default()
+        });
+        assert!(t.is_active());
+        assert_eq!(t.exceeded(), None);
+        t.add_spend(0.4);
+        t.add_spend(0.7);
+        let reason = t.exceeded().expect("should exceed");
+        assert!(reason.contains("spend"), "{}", reason);
+    }
+
+    #[test]
+    fn a_zero_cap_is_exceeded_by_any_spend() {
+        let mut t = BudgetTracker::new(Budget {
+            max_usd: Some(0.0),
+            ..Default::default()
+        });
+        t.add_spend(0.01);
+        assert!(t.exceeded().is_some());
+    }
+
+    #[test]
+    fn halt_stops_the_run() {
+        let mut t = BudgetTracker::new(Budget {
+            max_usd: Some(0.0),
+            on_exceed: OnExceed::Halt,
+            ..Default::default()
+        });
+        t.add_spend(1.0);
+        assert!(t.check().is_some());
+        assert!(t.halted, "the run must be marked halted");
+    }
+
+    #[test]
+    fn warn_keeps_going() {
+        let mut t = BudgetTracker::new(Budget {
+            max_usd: Some(0.0),
+            on_exceed: OnExceed::Warn,
+            ..Default::default()
+        });
+        t.add_spend(1.0);
+        assert_eq!(t.check(), None, "warn must not stop the run");
+        assert!(!t.halted);
+    }
+
+    #[test]
+    fn budget_halts_by_default() {
+        assert_eq!(Budget::default().on_exceed, OnExceed::Halt);
+    }
+
+    #[test]
+    fn budget_parses_from_a_manifest() {
+        let b: Budget = serde_json::from_str(
+            r#"{"max_wall_clock_seconds": 900, "max_usd": 5.0, "on_exceed": "halt"}"#,
+        )
+        .unwrap();
+        assert_eq!(b.max_wall_clock_seconds, Some(900));
+        assert_eq!(b.max_usd, Some(5.0));
+        assert_eq!(b.on_exceed, OnExceed::Halt);
+    }
 }

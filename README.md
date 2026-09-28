@@ -27,13 +27,14 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 *   **Fail Loud, Never Silent:** API errors are surfaced with their status and body instead of being coerced into plausible-looking model output. An LLM evaluator that cannot be reached aborts the run rather than recording a failure the agent never caused.
 *   **Honest Artifacts:** The patch header states what actually happened, derived from the run rather than hardcoded. A failed or regressed run never claims its rules were verified, and never instructs you to inject them.
 *   **Protected Rules & Data Egress (opt-in):** Mark safety/compliance rules immutable to the optimizer — they are hidden from it and any attempted change is quarantined for human sign-off. Declare a data class to control which providers may receive your material, with `--print-egress-plan` to inspect the outbound path before a run.
+*   **Noisy Graders Can't Write Rules:** A grader may answer `INDETERMINATE` when a document is undecidable. That verdict is excluded from scoring and halts the run rather than becoming a rule, and every verdict is recorded with its model, endpoint, and prompt hash so a patch decision stays re-verifiable.
 *   **Offline First via `llama.cpp`:** Run fully disconnected. Compile with `cargo run --features embedded-llm` to automatically pull and run a 4-bit `Qwen3` model directly in your computer's memory. To respect user disk space, NeuroPlasticity does not download duplicate models. It defaults to scanning universal POSIX caches (`~/.cache/neuro/models/`, `~/.cache/huggingface/hub/`, `~/.ollama/models/blobs/`, `~/.cache/lm-studio/models/`) to prevent redundant GGUF model downloads; the candidate list is editable at `~/.config/NeuroPlasticity/models.json`. Prompts are assembled with the chat template embedded in each GGUF, so non-Qwen models are not silently mis-prompted. (Features a concurrency Semaphore to protect RAM when running parallel evaluators).
 *   **Release binaries include the offline engine:** The published artifacts are built with `--features embedded-llm`, and CI asserts the engine is actually present before uploading. Builds without that flag compile successfully but abort at runtime on `provider: "embedded"`, so the check is enforced rather than documented.
 *   **Declarative `plasticity.json`:** Define your tasks, sandbox constraints, auth mounts, and determinism.
 *   **Tri-State Evaluators:** Evaluate your agents exactly how you need:
     1. `host_bash`: Fast, lightweight POSIX shell commands running locally.
     2. `container`: Isolated evaluation containers for heavy dependencies (Node.js, `pytest`, etc.) without host pollution.
-    3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted.
+    3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL"|"INDETERMINATE", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted. An `INDETERMINATE` is excluded from scoring and halts the run rather than becoming a rule.
 
 ## ⚡ How It Works
 
@@ -267,7 +268,48 @@ meta_llm provider: custom
   meta-optimizer    hosted → DENIED  (regulated data to a hosted provider: not listed…)
 ```
 
-### 5. Chained Evaluators & Preventing Regressions
+### 5. Grader Verdicts: `INDETERMINATE` and Provenance
+
+An LLM grader can return a third verdict, `INDETERMINATE`, meaning the document could not be judged from what was shown. It is deliberately **not** a `FAIL`:
+
+- An `INDETERMINATE` is **excluded from scoring** rather than counted as a failure, so a flaky grader cannot drag a run below threshold.
+- It is **never fed to the optimizer**. A run that receives one is halted with a diagnostic instead of optimized against a guess — passing an undecidable artifact to the optimizer as a failing log is exactly how noise becomes a rule.
+- The prompt tells the grader to reserve it for genuinely undecidable cases, never as a substitute for `FAIL`.
+
+Every verdict is recorded with the model, endpoint, temperature, and a hash of the grading prompt that produced it, and surfaced in the patch:
+
+```
+### Grader provenance
+
+- `custom/gpt-5.5 (temp=0, prompt=abcdef012345)` — verdict `PASS` · endpoint `https://opencode.ai/zen/v1/responses`
+```
+
+A patch decision should be re-verifiable months later, which requires knowing which model and prompt produced it.
+
+### 6. Budgets
+
+`optimization` takes an optional cap on what a run may consume. Omit it and nothing is capped.
+
+```json
+"optimization": {
+  "budget": {
+    "max_wall_clock_seconds": 900,
+    "max_usd": 5.00,
+    "on_exceed": "halt"
+  }
+}
+```
+
+The budget is checked **before each epoch**, so a halted run stops promptly rather than after another 120-second container spin-up. `on_exceed` defaults to `halt`; set it to `warn` to log and continue.
+
+A run that halts on budget has reached no conclusion either way, so it is reported as a distinct outcome — `🛑 HALTED ON BUDGET` — not as a pass and not as a partial run:
+
+```
+**Status:** 🛑 HALTED ON BUDGET — wall clock 900s exceeded the 300s budget. The run stopped
+before it reached a conclusion, so nothing here was verified either way.
+```
+
+### 7. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

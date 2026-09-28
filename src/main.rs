@@ -30,6 +30,10 @@ struct ManifestRun {
     blocked_by_regression: bool,
     /// Protected-rule changes that were reverted (F2).
     quarantined: Vec<rules::QuarantinedChange>,
+    /// Verdict provenance accumulated across epochs (F4a).
+    provenance: Vec<evaluator::VerdictProvenance>,
+    /// Set when the run stopped on a budget limit (F7).
+    budget_halt: Option<String>,
 }
 
 async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
@@ -100,15 +104,45 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         );
     }
 
+    // Budget (F7). No cap unless the manifest declares one.
+    let mut tracker =
+        manifest::BudgetTracker::new(manifest.optimization.budget.clone().unwrap_or_default());
+    if tracker.is_active() {
+        println!(
+            "💰 Budget active ({}).",
+            match manifest.optimization.budget.as_ref().map(|b| b.on_exceed) {
+                Some(manifest::OnExceed::Halt) => "halts on exceed".to_string(),
+                _ => "warns on exceed".to_string(),
+            }
+        );
+    }
+
     // Baseline is captured on the first epoch that actually evaluates, before
     // any rule has been mutated, and never re-captured.
     let mut baseline: Option<Vec<patch::EvaluatorOutcome>> = None;
     let mut final_results: Vec<patch::EvaluatorOutcome> = Vec::new();
     // Protected-rule changes reverted along the way (F2).
     let mut quarantined: Vec<rules::QuarantinedChange> = Vec::new();
+    // Verdict provenance accumulated across epochs (F4a).
+    let mut provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
+    // Set when the run stops on a budget limit (F7).
+    let mut budget_halt: Option<String> = None;
+
+    // Counts epochs actually run, so a budget halt does not report the
+    // configured maximum as if it had been reached.
+    let mut epochs_run: u32 = 0;
 
     for epoch in 1..=max_epochs {
         println!("\n--- Epoch {} / {} ---", epoch, max_epochs);
+
+        // Checked before doing any more work, so a halted run stops promptly
+        // rather than after the next container spin-up (F7).
+        if let Some(reason) = tracker.check() {
+            println!("🛑 Budget exceeded: {}", reason);
+            budget_halt = Some(reason);
+            break;
+        }
+        epochs_run = epoch as u32;
 
         // Calculate run fingerprint
         let evaluators_json = serde_json::to_string(&manifest.evaluators).unwrap_or_default();
@@ -183,6 +217,30 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
             score = eval_result.score;
             pass = eval_result.pass;
 
+            // An INDETERMINATE grader verdict is not evidence the agent is wrong.
+            // Passing it to the optimizer as a failing log is precisely how
+            // noise becomes a rule, so it is withheld and the run is halted
+            // rather than optimized against (F4a).
+            let indeterminate: Vec<String> = eval_result
+                .details
+                .iter()
+                .filter(|d| {
+                    d.output
+                        .as_deref()
+                        .is_some_and(|o| o.starts_with("INDETERMINATE"))
+                })
+                .map(|d| d.name.clone())
+                .collect();
+
+            if !indeterminate.is_empty() {
+                anyhow::bail!(
+                    "Grader returned INDETERMINATE for {}. That is not evidence the agent \
+                     failed, so the run is halted rather than optimized against a guess.\n\
+                     Improve the grader prompt, or use a stronger `meta_llm` model for it.",
+                    indeterminate.join(", ")
+                );
+            }
+
             // Record the baseline on the first evaluated epoch, and track the
             // final result set for the delta diff (F1).
             let outcomes = patch::EvaluatorOutcome::from_result(&eval_result);
@@ -190,6 +248,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 baseline = Some(outcomes.clone());
             }
             final_results = outcomes;
+            provenance.extend(eval_result.provenance.iter().cloned());
 
             println!(
                 "Score: {:.2} (Threshold: {:.2})",
@@ -236,6 +295,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 epochs_taken: epoch as u32,
                 blocked_by_regression: false,
                 quarantined,
+                provenance,
+                budget_halt,
                 report: patch::ManifestReport {
                     manifest_name: manifest.name.clone(),
                     passed: true,
@@ -357,12 +418,35 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
             }
 
             println!("Applied new rule optimization to {:?}", target_rules_file);
-        } else {
-            println!("❌ Max epochs reached without achieving pass threshold.");
         }
     }
 
+    // A budget halt is the proximate cause, not "exhausted the epochs": report
+    // the epochs actually run so a halted run is not described as if it had
+    // reached a conclusion.
+    let stopped_early = budget_halt.is_some();
+    if stopped_early {
+        println!(
+            "❌ Stopped after {} of {} configured epoch(s) on budget.",
+            epochs_run, max_epochs
+        );
+    } else {
+        println!("❌ Max epochs reached without achieving pass threshold.");
+    }
+    let epochs_taken = if stopped_early {
+        epochs_run
+    } else {
+        max_epochs as u32
+    };
+
     let baseline_outcomes = baseline.unwrap_or_default();
+    let report = patch::ManifestReport {
+        manifest_name: manifest.name.clone(),
+        passed: false,
+        epochs_taken,
+        baseline: baseline_outcomes,
+        final_results,
+    };
     // `block` refuses to present a rule set that regressed something green.
     let blocked_by_regression = manifest
         .optimization
@@ -370,29 +454,16 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         .as_ref()
         .map(|g| g.policy == manifest::RegressionPolicy::Block)
         .unwrap_or(false)
-        && patch::ManifestReport {
-            manifest_name: manifest.name.clone(),
-            passed: false,
-            epochs_taken: max_epochs as u32,
-            baseline: baseline_outcomes.clone(),
-            final_results: final_results.clone(),
-        }
-        .regressions()
-        .len()
-            > 0;
+        && !report.regressions().is_empty();
 
     Ok(ManifestRun {
         passed: false,
-        epochs_taken: max_epochs as u32,
+        epochs_taken,
         blocked_by_regression,
         quarantined,
-        report: patch::ManifestReport {
-            manifest_name: manifest.name.clone(),
-            passed: false,
-            epochs_taken: max_epochs as u32,
-            baseline: baseline_outcomes,
-            final_results,
-        },
+        provenance,
+        budget_halt,
+        report,
         manifest,
     })
 }
@@ -495,6 +566,10 @@ async fn main() -> Result<()> {
     let mut blocked_patch = false;
     // Protected rules the optimizer tried to change (F2).
     let mut quarantined_rules: Vec<rules::QuarantinedChange> = Vec::new();
+    // Set when a manifest stopped on a budget limit (F7).
+    let mut run_budget_halt: Option<String> = None;
+    // How each grader verdict was produced, for re-verifiability (F4a).
+    let mut verdict_provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
 
     let mut waterfall_restarts = 0;
     let max_restarts = queue.len() * 3; // Prevent infinite loops
@@ -524,6 +599,10 @@ async fn main() -> Result<()> {
             let epochs_taken = run.epochs_taken;
             let report = run.report;
             quarantined_rules.extend(run.quarantined);
+            verdict_provenance.extend(run.provenance);
+            if let Some(reason) = run.budget_halt {
+                run_budget_halt.get_or_insert(reason);
+            }
             final_manifest = Some(run.manifest);
 
             // Evaluate every regression-related fact before `report` is moved
@@ -601,11 +680,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    // A regression is the most severe outcome: it outranks a partial run.
-    let outcome = match (any_regression, any_partial) {
-        (Some(regression), _) => regression,
-        (None, Some(partial)) => partial,
-        (None, None) => patch::RunOutcome::Verified,
+    // A regression is the most severe outcome: it outranks everything else. A
+    // budget halt outranks a partial run, because the halt is why the run never
+    // reached a conclusion — the partial failure is a consequence, not the
+    // finding (F7).
+    let outcome = match (any_regression, any_partial, run_budget_halt.take()) {
+        (Some(regression), _, _) => regression,
+        (None, _, Some(reason)) => patch::RunOutcome::BudgetHalted { reason },
+        (None, Some(partial), None) => partial,
+        (None, None, None) => patch::RunOutcome::Verified,
     };
 
     // Write final patch
@@ -633,6 +716,7 @@ async fn main() -> Result<()> {
                             final_report.as_ref(),
                             &rule_texts,
                             &quarantined_rules,
+                            &verdict_provenance,
                         );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");

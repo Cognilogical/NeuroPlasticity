@@ -126,6 +126,28 @@
           "description": "Optional. Omit for 'annotate', which matches pre-existing behavior.",
           "additionalProperties": false
         },
+        "budget": {
+          "type": "object",
+          "description": "Optional. Omit for no cap on spend or time.",
+          "properties": {
+            "max_wall_clock_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Wall-clock seconds for the whole run. Checked before each epoch."
+            },
+            "max_usd": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Cumulative spend cap in USD. Requires a provider that reports cost."
+            },
+            "on_exceed": {
+              "type": "string",
+              "enum": ["halt", "warn"],
+              "description": "What to do when a limit is reached. Defaults to 'halt'. A halted run is reported as not verified."
+            }
+          },
+          "additionalProperties": false
+        },
         "data": {
           "type": "object",
           "description": "Optional. Omit the whole block and the manifest is unclassified: no egress enforcement applies, so existing manifests are unaffected. Declaring `data_class` turns enforcement on, and any provider not listed in `allow` is denied.",

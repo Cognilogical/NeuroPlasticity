@@ -8,6 +8,73 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
+/// A grader's verdict. `INDETERMINATE` is first-class and distinct from FAIL:
+/// feeding an undecidable artifact to the optimizer as a failure is how noise
+/// becomes a rule (F4a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Pass,
+    Fail,
+    Indeterminate,
+}
+
+impl Verdict {
+    /// Whether this verdict counts toward the run's pass score.
+    ///
+    /// An INDETERMINATE is not a pass, but it is also not a failure to
+    /// optimize against, so it is excluded from scoring rather than counted as
+    /// a fail.
+    pub fn scores_as_pass(self) -> bool {
+        matches!(self, Verdict::Pass)
+    }
+
+    pub fn scores_at_all(self) -> bool {
+        !matches!(self, Verdict::Indeterminate)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Pass => "PASS",
+            Verdict::Fail => "FAIL",
+            Verdict::Indeterminate => "INDETERMINATE",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_uppercase().as_str() {
+            "PASS" => Some(Verdict::Pass),
+            "FAIL" => Some(Verdict::Fail),
+            "INDETERMINATE" => Some(Verdict::Indeterminate),
+            _ => None,
+        }
+    }
+}
+
+/// How a verdict was produced, recorded so a decision is re-verifiable later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerdictProvenance {
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_style: Option<String>,
+    pub temperature: f64,
+    pub prompt_hash: String,
+    pub verdict: Verdict,
+}
+
+impl std::fmt::Display for VerdictProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{} (temp={}, prompt={})",
+            self.provider,
+            self.model,
+            self.temperature,
+            &self.prompt_hash[..self.prompt_hash.len().min(12)]
+        )
+    }
+}
+
 /// JSON Schema for an LLM evaluator's verdict.
 fn verdict_schema() -> serde_json::Value {
     serde_json::json!({
@@ -15,8 +82,8 @@ fn verdict_schema() -> serde_json::Value {
         "properties": {
             "verdict": {
                 "type": "string",
-                "enum": ["PASS", "FAIL"],
-                "description": "PASS only if the document satisfies the evaluation prompt."
+                "enum": ["PASS", "FAIL", "INDETERMINATE"],
+                "description": "PASS only if the document satisfies the evaluation prompt. Use INDETERMINATE when it cannot be judged from what is shown, never as a substitute for FAIL."
             },
             "reason": { "type": "string", "description": "One sentence explaining the verdict." }
         },
@@ -41,6 +108,8 @@ pub struct EvaluationResult {
     pub passing_weight: f64,
     pub threshold: f64,
     pub details: Vec<EvaluatorScore>,
+    /// How each LLM verdict was produced, for re-verification (F4a).
+    pub provenance: Vec<VerdictProvenance>,
 }
 
 pub async fn evaluate(
@@ -67,6 +136,8 @@ pub async fn evaluate(
     // abort the run instead of being scored as agent failures — otherwise the
     // optimizer "fixes" an agent that was never broken.
     let infra_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Verdict provenance for re-verifiability (F4a).
+    let provenance: Arc<Mutex<Vec<VerdictProvenance>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn each evaluator into an asynchronous task so they execute in parallel
     for eval in evaluators {
@@ -77,10 +148,14 @@ pub async fn evaluate(
         let llm_sem_clone = Arc::clone(&llm_semaphore);
         let sys_sem_clone = Arc::clone(&system_semaphore);
         let infra_errors_clone = Arc::clone(&infra_errors);
+        let provenance_clone = Arc::clone(&provenance);
         // Cloned so the spawned task owns it; `tokio::spawn` requires 'static.
         let data_handling = data_handling.clone();
 
         let handle = tokio::spawn(async move {
+            // Set when an LLM grader could not decide; such a verdict must be
+            // excluded from scoring rather than treated as a failure.
+            let mut score_indeterminate = false;
             let (success, output) = match eval_clone.r#type {
                 EvaluatorType::HostBash => {
                     let _permit = sys_sem_clone
@@ -299,8 +374,11 @@ pub async fn evaluate(
                             if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
                                 let system_prompt = concat!(
                                     "You are an automated evaluator. Grade the document against the prompt.\n",
-                                    "Reply with a single JSON object: {\"verdict\": \"PASS\"|\"FAIL\", ",
-                                    "\"reason\": \"<one sentence>\"} and nothing else."
+                                    "Answer with a single JSON object: {\"verdict\": \"PASS\"|\"FAIL\"|\"INDETERMINATE\", ",
+                                    "\"reason\": \"<one sentence>\"} and nothing else.\n",
+                                    "Use INDETERMINATE only when the document cannot be judged from ",
+                                    "what is shown, or the prompt is ambiguous — never as a substitute ",
+                                    "for FAIL when you can tell. Never describe the format you use."
                                 );
                                 let user_prompt = format!(
                                     "Evaluation Prompt:\n{}\n\nTarget Document ({}):\n{}",
@@ -315,42 +393,63 @@ pub async fn evaluate(
 
                                 match ask_llm_json(&meta_llm_clone, &spec).await {
                                     Ok(value) => {
-                                        let verdict = value
+                                        let raw = value
                                             .get("verdict")
                                             .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .trim()
-                                            .to_uppercase();
+                                            .unwrap_or_default();
                                         let reason = value
                                             .get("reason")
                                             .and_then(|r| r.as_str())
                                             .unwrap_or_default()
                                             .trim();
 
-                                        if verdict != "PASS" && verdict != "FAIL" {
-                                            infra_errors_clone.lock().unwrap().push(format!(
-                                                "LLM evaluator '{}' returned an unusable verdict ({:?})",
-                                                eval_clone.name, verdict
-                                            ));
-                                            (
-                                                false,
-                                                Some(format!(
-                                                    "Unusable LLM verdict: {:?}",
-                                                    verdict
-                                                )),
-                                            )
-                                        } else {
-                                            let success = verdict == "PASS";
-                                            let report = if reason.is_empty() {
-                                                verdict.clone()
-                                            } else {
-                                                format!("{} — {}", verdict, reason)
-                                            };
-                                            println!(
-                                                "LLM Evaluator '{}' Verdict: {}",
-                                                eval_clone.name, report
-                                            );
-                                            (success, Some(report))
+                                        match Verdict::parse(raw) {
+                                            None => {
+                                                infra_errors_clone.lock().unwrap().push(format!(
+                                                    "LLM evaluator '{}' returned an unusable verdict ({:?})",
+                                                    eval_clone.name, raw
+                                                ));
+                                                (
+                                                    false,
+                                                    Some(format!(
+                                                        "Unusable LLM verdict: {:?}",
+                                                        raw
+                                                    )),
+                                                )
+                                            }
+                                            Some(parsed) => {
+                                                // Provenance is recorded per verdict so a
+                                                // patch decision is re-verifiable later (F4a).
+                                                provenance_clone.lock().unwrap().push(
+                                                    VerdictProvenance {
+                                                        provider: meta_llm_clone.provider.clone(),
+                                                        model: meta_llm_clone.model.clone(),
+                                                        base_url: meta_llm_clone.base_url.clone(),
+                                                        api_style: meta_llm_clone.api_style.clone(),
+                                                        temperature: meta_llm_clone
+                                                            .temperature
+                                                            .unwrap_or(0.0),
+                                                        prompt_hash: hash_prompt(
+                                                            system_prompt,
+                                                            prompt,
+                                                        ),
+                                                        verdict: parsed,
+                                                    },
+                                                );
+
+                                                let success = parsed.scores_as_pass();
+                                                score_indeterminate = !parsed.scores_at_all();
+                                                let report = if reason.is_empty() {
+                                                    parsed.label().to_string()
+                                                } else {
+                                                    format!("{} — {}", parsed.label(), reason)
+                                                };
+                                                println!(
+                                                    "LLM Evaluator '{}' Verdict: {}",
+                                                    eval_clone.name, report
+                                                );
+                                                (success, Some(report))
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -384,12 +483,20 @@ pub async fn evaluate(
                 }
             };
 
-            EvaluatorScore {
+            let mut result = EvaluatorScore {
                 name: eval_clone.name,
                 success,
                 weight: eval_clone.weight,
                 output,
+            };
+
+            // An INDETERMINATE is excluded from scoring rather than counted as
+            // a fail: it is not evidence the agent is wrong, so it must not be
+            // fed to the optimizer as a failing log.
+            if score_indeterminate {
+                result.weight = 0.0;
             }
+            result
         });
 
         futures.push(handle);
@@ -433,5 +540,17 @@ pub async fn evaluate(
         passing_weight,
         threshold: pass_threshold,
         details,
+        provenance: provenance.lock().unwrap().clone(),
     })
+}
+
+/// Stable hash of a grader's instruction, so a verdict can be traced to the
+/// prompt that produced it.
+fn hash_prompt(system_prompt: &str, user_prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(system_prompt.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(user_prompt.as_bytes());
+    hex::encode(hasher.finalize())
 }
