@@ -309,7 +309,52 @@ A run that halts on budget has reached no conclusion either way, so it is report
 before it reached a conclusion, so nothing here was verified either way.
 ```
 
-### 7. Chained Evaluators & Preventing Regressions
+### 7. Transcripts, Failure Localization & Invariants
+
+**F6a — the ordered transcript.** An agent can emit a run transcript as JSON Lines in its scratch workspace (`transcript.jsonl`), one step per line:
+
+```json
+{"id": "s1", "kind": "lookup", "status": "failed", "detail": "no availability"}
+{"id": "s2", "kind": "book",   "status": "ok",     "detail": "booked flight-123"}
+```
+
+Fields: `id` (stable, unique), `kind`, `status` (`ok` / `failed` / `skipped`), and optional `input_ref`, `output_ref`, `detail`. This is **additive** — stdout/stderr capture is untouched, and a missing or unusable transcript never fails a run. A truncated final line is tolerated, so an agent killed mid-write still yields the steps it completed.
+
+**F5 — failure localization.** The optimizer previously received one whole-run blob, so a failure local to step 7 could only produce a *global* rule — and global rules are how an optimizer fixes one behavior and quietly changes three others. An evaluator can now name the step it judges:
+
+```json
+{ "name": "no availability message", "unit": "s1", "type": "host_bash", "script": [...], "weight": 1.0 }
+```
+
+When that step actually failed, the optimizer is shown *that step* with one step of surrounding context, and the patch names it:
+
+```
+#### Rule 2 (step `s1`)
+> When a lookup returns no availability, state that plainly instead of booking.
+```
+
+**F6 — cross-cutting invariants.** Unit-style tests cannot express "never does X after Y" or "at most one of these is ever true" — precisely the properties that matter in long-horizon agents. An evaluator with `kind: "invariant"` is checked against the whole ordered transcript:
+
+```json
+{
+  "name": "never-books-after-failed-lookup",
+  "kind": "invariant",
+  "assert": "no_action_after_failure",
+  "weight": 1.0
+}
+```
+
+| `assert` | Meaning |
+|---|---|
+| `no_action_after_failure` | No successful action of any kind after a step failed |
+| `at_most_once` | Steps of `unit` occur at most once across the run |
+| `no_failed_steps` | No step in the run failed |
+
+A violation names the **transition** that broke it (`s1 → s2`), not just the run. The set is deliberately restricted to properties decidable from the transcript alone, so invariants stay deterministic rather than asking a model to reason about a sequence. An unknown `assert` fails loudly instead of passing silently, and an agent that emits no transcript causes invariants to be **skipped**, not failed.
+
+Note that `no_action_after_failure` compares ordering, not kinds — a `book` after a `lookup` failure violates it even though the kinds differ, which is the case a naive kind check would miss.
+
+### 8. Chained Evaluators & Preventing Regressions
 As your agent gets more complex, fixing one bug might introduce another. NeuroPlasticity supports **Chained Evaluators** to prevent regressions. You can define multiple independent tests in your `plasticity.json`. 
 
 The Meta-Optimizer must find a system prompt that satisfies *all* evaluators simultaneously to achieve a `pass_threshold` of 1.0.

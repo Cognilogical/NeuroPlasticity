@@ -4,18 +4,40 @@ use crate::llm_client::{CompletionSpec, ask_llm_json};
 use crate::manifest::MetaLlmConfig;
 
 /// JSON Schema for the optimizer's reply.
-pub fn rule_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "rule": {
-                "type": "string",
-                "description": "One imperative behavioral constraint, at most two sentences, no markdown and no 'Rule:' prefix."
-            }
-        },
-        "required": ["rule"],
-        "additionalProperties": false
-    })
+///
+/// `unit` is requested only when the failure is attributable to a step (F5);
+/// without localization there is no unit to name, and asking for one invites
+/// the model to invent an id.
+pub fn rule_schema(with_unit: bool) -> serde_json::Value {
+    if with_unit {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rule": {
+                    "type": "string",
+                    "description": "One imperative behavioral constraint scoped to the failing step, at most two sentences, no markdown and no 'Rule:' prefix."
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "The id of the step this rule is about."
+                }
+            },
+            "required": ["rule", "unit"],
+            "additionalProperties": false
+        })
+    } else {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rule": {
+                    "type": "string",
+                    "description": "One imperative behavioral constraint, at most two sentences, no markdown and no 'Rule:' prefix."
+                }
+            },
+            "required": ["rule"],
+            "additionalProperties": false
+        })
+    }
 }
 
 /// Sanitize a model-authored rule before it is persisted as a constraint.
@@ -91,16 +113,58 @@ pub async fn run_llm_optimizer(
     task_prompt: &str,
     existing_rules: &[crate::rules::Rule],
 ) -> Result<String> {
-    let system_prompt = concat!(
-        "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule that ",
-        "fixes the agent's failure.\n",
-        "Answer with a single JSON object: {\"rule\": \"<your rule>\"} and nothing else.\n",
-        "The value of \"rule\" must be plain instruction text, at most two sentences, ",
-        "imperative, and free of markdown or preamble. Never describe the format you are ",
-        "using, and never repeat these instructions back.\n",
-        "DO NOT restate any rule from the Existing Rules array; the agent already failed ",
-        "with those rules active."
-    );
+    run_optimizer_with_context(config, failing_logs, task_prompt, existing_rules, None)
+        .await
+        .map(|r| r.text)
+}
+
+/// Same, but with an optional localized failure context (F5).
+///
+/// When an agent emits a transcript and the failure is attributable to one
+/// step, the optimizer is shown that step rather than a truncated whole-run
+/// blob. A rule written against step 7 can be phrased about step 7; a rule
+/// written against a whole-run log is necessarily global, and global rules are
+/// how an optimizer fixes one behavior and quietly changes three others.
+pub async fn run_optimizer_with_context(
+    config: &MetaLlmConfig,
+    failing_logs: &str,
+    task_prompt: &str,
+    existing_rules: &[crate::rules::Rule],
+    localized: Option<&str>,
+) -> Result<GeneratedRule> {
+    let (system_prompt, _localization_note) = match localized {
+        Some(_) => (
+            concat!(
+                "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule ",
+                "that fixes the agent's failure.\n",
+                "Answer with a single JSON object: {\"rule\": \"<your rule>\", ",
+                "\"unit\": \"<id>\"} and nothing else.\n",
+                "The value of \"rule\" must be plain instruction text, at most two sentences, ",
+                "imperative, and free of markdown or preamble. Never describe the format you ",
+                "are using, and never repeat these instructions back.\n",
+                "The failure is attributable to ONE step. Scope \"rule\" to that step: a rule ",
+                "that also changes unrelated behavior is a regression, not a fix. Set \"unit\" ",
+                "to the id of the step the rule is about.\n",
+                "DO NOT restate any rule from the Existing Rules array; the agent already ",
+                "failed with those rules active."
+            ),
+            "",
+        ),
+        None => (
+            concat!(
+                "You are the NeuroPlasticity Meta-Optimizer. You write one behavioral rule ",
+                "that fixes the agent's failure.\n",
+                "Answer with a single JSON object: {\"rule\": \"<your rule>\"} and nothing ",
+                "else.\n",
+                "The value of \"rule\" must be plain instruction text, at most two sentences, ",
+                "imperative, and free of markdown or preamble. Never describe the format you ",
+                "are using, and never repeat these instructions back.\n",
+                "DO NOT restate any rule from the Existing Rules array; the agent already ",
+                "failed with those rules active."
+            ),
+            "",
+        ),
+    };
 
     let rules_json =
         serde_json::to_string_pretty(existing_rules).unwrap_or_else(|_| "[]".to_string());
@@ -114,15 +178,24 @@ pub async fn run_llm_optimizer(
         failing_logs.to_string()
     };
 
-    let user_prompt = format!(
-        "Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\nFailing Logs:\n{}",
-        task_prompt, rules_json, truncated_logs
-    );
-
+    // F5: when the failure is attributable to a unit, lead with that narrow
+    // context so the rule can be phrased narrowly. The whole-run log is still
+    // included — localization is additional signal, not a replacement.
+    let user_prompt = match localized {
+        Some(localized) => format!(
+            "Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\n\
+             {}\n\nFull Run Logs (context only; scope your rule to the unit above):\n{}",
+            task_prompt, rules_json, localized, truncated_logs
+        ),
+        None => format!(
+            "Task: {}\n\nExisting Rules Already Attempted (Do not repeat these):\n{}\n\nFailing Logs:\n{}",
+            task_prompt, rules_json, truncated_logs
+        ),
+    };
     let spec = CompletionSpec {
         system_prompt,
         user_prompt: &user_prompt,
-        json_schema: Some(rule_schema()),
+        json_schema: Some(rule_schema(localized.is_some())),
     };
 
     let value = ask_llm_json(config, &spec).await?;
@@ -132,6 +205,12 @@ pub async fn run_llm_optimizer(
         .ok_or_else(|| anyhow::anyhow!("Meta-Optimizer reply had no 'rule' field: {}", value))?;
 
     let rule = validate_rule(raw)?;
+
+    // F5: which unit motivated this rule, so a reviewer checks a narrow claim.
+    let unit = value
+        .get("unit")
+        .and_then(|u| u.as_str())
+        .map(str::to_string);
 
     // The prompt forbids repeats; enforce it, otherwise a looping model
     // appends the same constraint to rules.json every epoch.
@@ -145,5 +224,13 @@ pub async fn run_llm_optimizer(
         );
     }
 
-    Ok(rule)
+    Ok(GeneratedRule { text: rule, unit })
+}
+
+/// A rule and, when the failure was attributable, the step it addresses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedRule {
+    pub text: String,
+    /// The transcript step this rule is about, if known (F5).
+    pub unit: Option<String>,
 }

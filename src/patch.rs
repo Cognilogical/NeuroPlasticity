@@ -243,6 +243,8 @@ pub fn render_patch(
     rules: &[String],
     quarantined: &[crate::rules::QuarantinedChange],
     provenance: &[crate::evaluator::VerdictProvenance],
+    transcript: Option<&crate::transcript::Transcript>,
+    rule_units: &[Option<String>],
 ) -> String {
     let mut doc = String::from("# 🧠 NeuroPlasticity Improvement Patch\n\n");
     doc.push_str(&format!("**Target Project:** `{}`\n", target_project));
@@ -313,6 +315,12 @@ pub fn render_patch(
         doc.push('\n');
     }
 
+    if let Some(t) = transcript {
+        doc.push_str("### Run transcript\n\n");
+        doc.push_str(&t.render_summary());
+        doc.push('\n');
+    }
+
     if !provenance.is_empty() {
         doc.push_str("### Grader provenance\n\n");
         doc.push_str(
@@ -339,9 +347,13 @@ pub fn render_patch(
         "### Proposed rules\n\n"
     });
     for (i, rule) in rules.iter().enumerate() {
+        // F5: name the step a rule addresses, so a reviewer checks a narrow
+        // claim instead of auditing a global one.
+        let unit = rule_units.get(i).and_then(|u| u.as_deref());
         doc.push_str(&format!(
-            "#### Rule {}\n<!-- verified:{} -->\n> {}\n\n",
+            "#### Rule {}{}\n<!-- verified:{} -->\n> {}\n\n",
             i + 1,
+            unit.map(|u| format!(" (step `{}`)", u)).unwrap_or_default(),
             outcome.rules_are_verified(),
             rule
         ));
@@ -507,6 +519,8 @@ mod tests {
             &["Do not wrap JSON in fences".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(patch.contains("PARTIAL"), "{}", patch);
         assert!(!patch.contains("permanently inject"), "{}", patch);
@@ -525,6 +539,8 @@ mod tests {
             &["rule one".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(partial.contains("outcome: partial"), "{}", partial);
         assert!(partial.contains("rules_verified: false"), "{}", partial);
@@ -541,6 +557,8 @@ mod tests {
             &["rule one".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(regressed.contains("outcome: regressed"), "{}", regressed);
         assert!(regressed.contains("rules_verified: false"), "{}", regressed);
@@ -551,6 +569,8 @@ mod tests {
             None,
             &["rule one".to_string()],
             &[],
+            &[],
+            None,
             &[],
         );
         assert!(verified.contains("outcome: verified"), "{}", verified);
@@ -572,6 +592,8 @@ mod tests {
             &["rule".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(
             patch.contains("regressed_evaluator: host_bash: no secrets"),
@@ -590,6 +612,8 @@ mod tests {
             Some(&sample_report()),
             &["The only real rule.".to_string()],
             &[],
+            &[],
+            None,
             &[],
         );
 
@@ -616,6 +640,8 @@ mod tests {
             &["r".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(verified.contains("### Verified rules"), "{}", verified);
         assert!(!verified.contains("### Proposed rules"), "{}", verified);
@@ -630,6 +656,8 @@ mod tests {
             &["r".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(partial.contains("### Proposed rules"), "{}", partial);
         assert!(!partial.contains("### Verified rules"), "{}", partial);
@@ -639,7 +667,7 @@ mod tests {
     /// nothing to inject, and the phrasing implies otherwise.
     #[test]
     fn no_rules_means_nothing_to_apply() {
-        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[], &[]);
+        let patch = render_patch("d", &RunOutcome::Verified, None, &[], &[], &[], None, &[]);
         assert!(!patch.contains("permanently inject"), "{}", patch);
         assert!(!patch.contains("#### Rule"), "{}", patch);
     }
@@ -682,6 +710,8 @@ mod tests {
             &["r".to_string()],
             &[],
             &provenance,
+            None,
+            &[],
         );
         assert!(patch.contains("### Grader provenance"), "{}", patch);
         assert!(patch.contains("custom/gpt-5.5"), "{}", patch);
@@ -707,6 +737,8 @@ mod tests {
                 rule_text: "Never disclose credentials".to_string(),
                 reason: "protected rule was removed or altered by the optimizer".to_string(),
             }],
+            &[],
+            None,
             &[],
         );
         assert!(
@@ -785,6 +817,8 @@ mod tests {
             &["broaden the rule".to_string()],
             &[],
             &[],
+            None,
+            &[],
         );
         assert!(patch.contains("outcome: regressed"), "{}", patch);
         assert!(patch.contains("rules_verified: false"), "{}", patch);
@@ -828,6 +862,8 @@ mod tests {
             Some(&sample_report()),
             &["be careful".to_string()],
             &[],
+            &[],
+            None,
             &[],
         );
         assert!(

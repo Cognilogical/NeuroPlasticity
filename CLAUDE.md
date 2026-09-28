@@ -79,6 +79,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full walkthrough. Key p
 - `src/rules.rs` — the rules-file model (`behavioral` / `constraint`) and the protected-rule policy. A protected rule is hidden from the optimizer, and an attempted change is reverted and quarantined.
 - `src/egress.rs` — data-class and egress policy. Opt-in: absent `data_class`, no enforcement. With one, unlisted hosted providers are denied and the run aborts naming the provider, class, and remedy.
 - `src/patch.rs` — patch rendering. The status line is a function of the run outcome (`Verified` / `Partial` / `Regressed`), never a constant, and only a verified run earns "permanently inject" advice.
+- `src/transcript.rs` — the ordered run model: `step { id, kind, status, ... }` parsed from a JSON-lines sidecar. Optional and additive; a missing transcript never fails a run. It is what makes failures attributable (F5) and cross-cutting properties checkable (F6).
 - `src/embedded_llm.rs` — local `llama.cpp` inference, GGUF discovery/caching, and per-model chat templates.
 - `src/fingerprint.rs` — failure-only cache keyed on the full test configuration.
 
@@ -90,4 +91,6 @@ Model configuration lives in exactly one place: `optimization.meta_llm` in `plas
 - **Determinism by default.** `temperature` defaults to `0.0`; grading must not flap between runs.
 - **Treat generated rules as code.** They are injected into an agent prompt forever, so validate before persisting. A rule marked `constraint` is never optimizer-writable.
 - **Never emit an unearned claim.** A patch header's status must derive from the run. This is the tool's central trust signal, and the failure mode is worst exactly when it matters.
+- **Attribute before generalizing.** A rule written against a whole-run log is necessarily global. When a failure belongs to one step, scope the rule to that step.
+- **Refuse, don't coerce, and never pass silently.** An unknown invariant, an unusable verdict, or an unreachable endpoint is a loud failure — not a quiet pass.
 - **Platform-agnostic code paths.** Model paths use `shellexpand`/forward slashes; keep runtime branching on `cfg(target_os)` rather than OS checks.

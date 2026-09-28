@@ -275,6 +275,28 @@ pub struct Evaluator {
     pub prompt: Option<String>,
     pub target_file: Option<String>,
     pub weight: f64,
+    /// Transcript step this evaluator judges (F5). Refers to a step `id` in the
+    /// agent's transcript, not a string offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// `example` (default) judges one outcome. `invariant` judges a property
+    /// that must hold across the whole run (F6).
+    #[serde(default)]
+    pub kind: EvaluatorKind,
+    /// Required when `kind` is `invariant`. One of `no_action_after_failure`,
+    /// `at_most_once`, `no_failed_steps`. Kept to properties decidable from the
+    /// transcript alone, so invariants stay deterministic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assert: Option<String>,
+}
+
+/// Whether an evaluator judges a single outcome or a cross-cutting property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatorKind {
+    #[default]
+    Example,
+    Invariant,
 }
 
 #[cfg(test)]

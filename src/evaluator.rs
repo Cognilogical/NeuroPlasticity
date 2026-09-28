@@ -1,5 +1,5 @@
 use crate::llm_client::{CompletionSpec, ask_llm_json};
-use crate::manifest::{Evaluator, EvaluatorType, MetaLlmConfig, Sandbox};
+use crate::manifest::{Evaluator, EvaluatorKind, EvaluatorType, MetaLlmConfig, Sandbox};
 use anyhow::Result;
 use futures::future::join_all;
 use std::path::Path;
@@ -98,6 +98,8 @@ pub struct EvaluatorScore {
     pub success: bool,
     pub weight: f64,
     pub output: Option<String>, // Useful to capture why an LLM or container failed
+    /// The transcript step this failure is attributable to (F5/F6).
+    pub attributed_unit: Option<String>,
 }
 
 #[derive(Debug)]
@@ -119,6 +121,7 @@ pub async fn evaluate(
     sandbox: &Sandbox,
     meta_llm: &MetaLlmConfig,
     data_handling: &crate::egress::DataHandling,
+    transcript: Option<&crate::transcript::Transcript>,
 ) -> Result<EvaluationResult> {
     let mut futures = Vec::new();
 
@@ -151,11 +154,35 @@ pub async fn evaluate(
         let provenance_clone = Arc::clone(&provenance);
         // Cloned so the spawned task owns it; `tokio::spawn` requires 'static.
         let data_handling = data_handling.clone();
+        let transcript = transcript.cloned();
 
         let handle = tokio::spawn(async move {
             // Set when an LLM grader could not decide; such a verdict must be
             // excluded from scoring rather than treated as a failure.
             let mut score_indeterminate = false;
+            // F6: an invariant judges a property across the whole run, so it
+            // runs first and can fail a run whose individual steps all pass.
+            if eval_clone.kind == EvaluatorKind::Invariant {
+                let (success, output) = evaluate_invariant(&eval_clone, transcript.as_ref());
+                if let Some(out) = &output {
+                    println!("Invariant '{}': {}", eval_clone.name, out);
+                }
+                let mut score = EvaluatorScore {
+                    name: eval_clone.name.clone(),
+                    success,
+                    weight: eval_clone.weight,
+                    output,
+                    attributed_unit: None,
+                };
+                if let Some(t) = transcript.as_ref() {
+                    score.attributed_unit = t
+                        .first_failure()
+                        .map(|s| s.id.clone())
+                        .or_else(|| score.attributed_unit.clone());
+                }
+                return score;
+            }
+
             let (success, output) = match eval_clone.r#type {
                 EvaluatorType::HostBash => {
                     let _permit = sys_sem_clone
@@ -184,6 +211,7 @@ pub async fn evaluate(
                                         "Security Exception: host_bash command '{}' is not in the system allowlist. Evaluators must use container environment for arbitrary execution.",
                                         cmd_name
                                     )),
+                                    attributed_unit: None,
                                 };
                             }
 
@@ -196,6 +224,7 @@ pub async fn evaluate(
                                     output: Some(format!(
                                         "Security Exception: host_bash command cannot be a relative file execution."
                                     )),
+                                    attributed_unit: None,
                                 };
                             }
 
@@ -256,6 +285,7 @@ pub async fn evaluate(
                                     success: false,
                                     weight: eval_clone.weight,
                                     output: Some(format!("Container engine error: {}", e)),
+                                    attributed_unit: None,
                                 };
                             }
                         };
@@ -363,6 +393,7 @@ pub async fn evaluate(
                             success: false,
                             weight: eval_clone.weight,
                             output: Some(format!("Egress Error: {}", e)),
+                            attributed_unit: None,
                         };
                     }
 
@@ -484,10 +515,18 @@ pub async fn evaluate(
             };
 
             let mut result = EvaluatorScore {
-                name: eval_clone.name,
+                name: eval_clone.name.clone(),
                 success,
                 weight: eval_clone.weight,
                 output,
+                // F5: a failure is attributable when the evaluator names a unit
+                // and that unit actually failed.
+                attributed_unit: eval_clone.unit.clone().filter(|unit| {
+                    transcript
+                        .as_ref()
+                        .and_then(|t| t.step(unit))
+                        .is_some_and(|s| s.status.is_failure())
+                }),
             };
 
             // An INDETERMINATE is excluded from scoring rather than counted as
@@ -544,6 +583,131 @@ pub async fn evaluate(
     })
 }
 
+/// Evaluate a cross-cutting invariant against the ordered transcript (F6).
+///
+/// Unit-style tests cannot express "never does X after Y" or "at most one of
+/// these states is ever true". These are the properties that matter most in
+/// long-horizon agents, and they need the full ordered transcript, not one
+/// manifest's output.
+///
+/// Attribution is required: a failure must name the transition that violated
+/// the invariant, not just the run. Invariants are restricted to the properties
+/// that can be decided from the transcript alone, so this stays deterministic
+/// rather than asking a model to reason about a sequence.
+fn evaluate_invariant(
+    eval: &Evaluator,
+    transcript: Option<&crate::transcript::Transcript>,
+) -> (bool, Option<String>) {
+    let Some(eval_assert) = eval.assert.as_deref() else {
+        return (
+            false,
+            Some("An invariant evaluator requires an `assert` property.".to_string()),
+        );
+    };
+
+    let Some(transcript) = transcript else {
+        // Degrade gracefully: a run whose agent emits no transcript cannot be
+        // checked for invariants, and must not fail for that alone.
+        return (
+            true,
+            Some("INVARIANT SKIPPED — the agent emitted no transcript, so this property could not be checked.".to_string()),
+        );
+    };
+
+    match eval_assert {
+        // "no booking after a failed lookup in the same run"
+        "no_action_after_failure" => {
+            let Some(failure) = transcript.first_failure() else {
+                return (true, Some("INVARIANT OK — no step failed.".to_string()));
+            };
+            let offenders: Vec<&crate::transcript::Step> = transcript
+                .steps
+                .iter()
+                .filter(|s| !s.status.is_failure() && !s.kind.is_empty() && s.index > failure.index)
+                .collect();
+            if offenders.is_empty() {
+                (
+                    true,
+                    Some(format!(
+                        "INVARIANT OK — no action of any kind after the failure at `{}`.",
+                        failure.id
+                    )),
+                )
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "INVARIANT VIOLATED — a `{}` action at `{}` occurred after `{}` failed. \
+                         Violating transition: {} → {}.",
+                        offenders[0].kind, offenders[0].id, failure.id, failure.id, offenders[0].id
+                    )),
+                )
+            }
+        }
+        // "at most one of these two states is ever true"
+        "at_most_once" => {
+            let Some(unit) = eval.unit.as_deref() else {
+                return (
+                    false,
+                    Some("`at_most_once` requires a `unit` naming the step to count.".to_string()),
+                );
+            };
+            let count = transcript.steps_of_kind(unit).len();
+            if count <= 1 {
+                (
+                    true,
+                    Some(format!(
+                        "INVARIANT OK — `{}` occurred {} time(s).",
+                        unit, count
+                    )),
+                )
+            } else {
+                let offenders: Vec<&str> = transcript
+                    .steps_of_kind(unit)
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect();
+                (
+                    false,
+                    Some(format!(
+                        "INVARIANT VIOLATED — `{}` occurred {} times: {}.",
+                        unit,
+                        count,
+                        offenders.join(", ")
+                    )),
+                )
+            }
+        }
+        "no_failed_steps" => {
+            let failures = transcript.failing_steps();
+            if failures.is_empty() {
+                (true, Some("INVARIANT OK — no step failed.".to_string()))
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "INVARIANT VIOLATED — {} step(s) failed: {}.",
+                        failures.len(),
+                        failures
+                            .iter()
+                            .map(|s| s.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                )
+            }
+        }
+        other => (
+            false,
+            Some(format!(
+                "Unknown invariant `{}`. Supported: no_action_after_failure, at_most_once, \
+                 no_failed_steps.",
+                other
+            )),
+        ),
+    }
+}
+
 /// Stable hash of a grader's instruction, so a verdict can be traced to the
 /// prompt that produced it.
 fn hash_prompt(system_prompt: &str, user_prompt: &str) -> String {
@@ -553,4 +717,158 @@ fn hash_prompt(system_prompt: &str, user_prompt: &str) -> String {
     hasher.update(b"\x00");
     hasher.update(user_prompt.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{Evaluator, EvaluatorKind};
+    use crate::transcript::Transcript;
+
+    fn transcript(jsonl: &str) -> Transcript {
+        crate::transcript::parse_jsonl(jsonl).expect("test transcript should parse")
+    }
+
+    fn invariant(assert: &str, unit: Option<&str>) -> Evaluator {
+        Evaluator {
+            name: "invariant".to_string(),
+            r#type: EvaluatorType::HostBash,
+            script: None,
+            image: None,
+            command: None,
+            setup_script: None,
+            prompt: None,
+            target_file: None,
+            weight: 1.0,
+            unit: unit.map(str::to_string),
+            kind: EvaluatorKind::Invariant,
+            assert: Some(assert.to_string()),
+        }
+    }
+
+    /// F6's headline property: a booking after a failed lookup. The action and
+    /// the failure have *different* kinds, which is the whole point — a
+    /// kind-matching check would miss this entirely.
+    #[test]
+    fn no_action_after_failure_catches_a_cross_kind_violation() {
+        let t = transcript(concat!(
+            r#"{"id":"s1","kind":"lookup","status":"failed"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"book","status":"ok"}"#
+        ));
+        let (ok, output) =
+            evaluate_invariant(&invariant("no_action_after_failure", None), Some(&t));
+        assert!(
+            !ok,
+            "a booking after a failed lookup must violate the invariant"
+        );
+        let msg = output.unwrap();
+        assert!(msg.contains("VIOLATED"), "{}", msg);
+        // Attribution is required: name the transition, not just the run.
+        assert!(msg.contains("s1 → s2"), "{}", msg);
+    }
+
+    #[test]
+    fn no_action_after_failure_passes_when_nothing_follows() {
+        let t = transcript(concat!(
+            r#"{"id":"s1","kind":"lookup","status":"failed"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"lookup","status":"ok"}"#
+        ));
+        // A later step of the *same* kind is still an action after a failure.
+        let (ok, _) = evaluate_invariant(&invariant("no_action_after_failure", None), Some(&t));
+        assert!(!ok, "any action after a failure violates this invariant");
+    }
+
+    #[test]
+    fn no_action_after_failure_passes_on_a_clean_run() {
+        let t = transcript(concat!(
+            r#"{"id":"s1","kind":"lookup","status":"ok"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"book","status":"ok"}"#
+        ));
+        let (ok, output) =
+            evaluate_invariant(&invariant("no_action_after_failure", None), Some(&t));
+        assert!(ok, "{:?}", output);
+    }
+
+    #[test]
+    fn at_most_once_counts_across_the_run() {
+        let one = transcript(r#"{"id":"s1","kind":"book","status":"ok"}"#);
+        assert!(evaluate_invariant(&invariant("at_most_once", Some("book")), Some(&one)).0);
+
+        let two = transcript(concat!(
+            r#"{"id":"s1","kind":"book","status":"ok"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"book","status":"ok"}"#
+        ));
+        let (ok, output) = evaluate_invariant(&invariant("at_most_once", Some("book")), Some(&two));
+        assert!(!ok);
+        assert!(
+            output.unwrap().contains("s1, s2"),
+            "must name both offenders"
+        );
+    }
+
+    #[test]
+    fn at_most_once_requires_a_unit() {
+        let t = transcript(r#"{"id":"s1","kind":"book","status":"ok"}"#);
+        let (ok, output) = evaluate_invariant(&invariant("at_most_once", None), Some(&t));
+        assert!(!ok);
+        assert!(output.unwrap().contains("requires a `unit`"));
+    }
+
+    #[test]
+    fn no_failed_steps_catches_a_globally_failing_run() {
+        let t = transcript(concat!(
+            r#"{"id":"s1","kind":"lookup","status":"ok"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"book","status":"failed"}"#
+        ));
+        let (ok, output) = evaluate_invariant(&invariant("no_failed_steps", None), Some(&t));
+        assert!(!ok);
+        assert!(output.unwrap().contains("s2"));
+    }
+
+    /// Degrade gracefully: an agent that emits no transcript must not fail a
+    /// run for lacking one.
+    #[test]
+    fn invariant_is_skipped_without_a_transcript() {
+        let (ok, output) = evaluate_invariant(&invariant("no_failed_steps", None), None);
+        assert!(ok, "a missing transcript must not fail the run");
+        assert!(output.unwrap().contains("SKIPPED"));
+    }
+
+    #[test]
+    fn an_unknown_invariant_is_reported_not_ignored() {
+        let t = transcript(r#"{"id":"s1","kind":"book","status":"ok"}"#);
+        let (ok, output) = evaluate_invariant(&invariant("make_it_nice", None), Some(&t));
+        assert!(
+            !ok,
+            "an unrecognized property must fail loudly, not pass silently"
+        );
+        assert!(output.unwrap().contains("Unknown invariant"));
+    }
+
+    #[test]
+    fn an_invariant_without_assert_is_a_configuration_error() {
+        let mut eval = invariant("no_failed_steps", None);
+        eval.assert = None;
+        let t = transcript(r#"{"id":"s1","kind":"book","status":"ok"}"#);
+        let (ok, output) = evaluate_invariant(&eval, Some(&t));
+        assert!(!ok);
+        assert!(output.unwrap().contains("requires an `assert`"));
+    }
+
+    /// F5: a unit attribution only stands when that unit actually failed.
+    #[test]
+    fn unit_attribution_requires_the_named_unit_to_have_failed() {
+        let t = transcript(concat!(
+            r#"{"id":"s1","kind":"lookup","status":"ok"}"#,
+            "\n",
+            r#"{"id":"s2","kind":"book","status":"failed"}"#
+        ));
+        assert!(t.step("s1").is_some_and(|s| !s.status.is_failure()));
+        assert!(t.step("s2").is_some_and(|s| s.status.is_failure()));
+    }
 }

@@ -18,6 +18,7 @@ pub mod patch;
 pub mod reporter;
 pub mod rules;
 pub mod runner;
+pub mod transcript;
 
 /// Result of running one manifest: pass/fail, epochs used, and the per-evaluator
 /// outcomes needed for a baseline diff.
@@ -32,6 +33,10 @@ struct ManifestRun {
     quarantined: Vec<rules::QuarantinedChange>,
     /// Verdict provenance accumulated across epochs (F4a).
     provenance: Vec<evaluator::VerdictProvenance>,
+    /// The run's ordered transcript, when the agent emitted one (F6a).
+    transcript: Option<transcript::Transcript>,
+    /// Which unit each generated rule addresses (F5).
+    rule_units: Vec<Option<String>>,
     /// Set when the run stopped on a budget limit (F7).
     budget_halt: Option<String>,
 }
@@ -127,6 +132,12 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
     let mut provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
     // Set when the run stops on a budget limit (F7).
     let mut budget_halt: Option<String> = None;
+    // Ordered transcript, when the agent emitted one (F6a).
+    let mut transcript: Option<transcript::Transcript> = None;
+    // The transcript step a failing evaluator attributed this epoch to (F5).
+    let mut failing_unit: Option<String> = None;
+    // Which unit each generated rule addresses, aligned with rule order.
+    let mut rule_units: Vec<Option<String>> = Vec::new();
 
     // Counts epochs actually run, so a budget halt does not report the
     // configured maximum as if it had been reached.
@@ -201,6 +212,17 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
             println!("=== AGENT STDOUT ===\n{}\n=== END STDOUT ===", stdout);
             println!("=== AGENT STDERR ===\n{}\n=== END STDERR ===", stderr);
 
+            // F6a: an agent may emit an ordered transcript alongside stdout.
+            // Additive — a missing or unusable transcript never fails a run.
+            transcript = transcript::read_sidecar(scratch_path);
+            if let Some(t) = &transcript {
+                println!(
+                    "📋 Transcript: {} step(s), {} failed",
+                    t.len(),
+                    t.failing_steps().len()
+                );
+            }
+
             // 4. Evaluate & Score
             println!("Evaluating side effects...");
             let eval_result = evaluator::evaluate(
@@ -210,6 +232,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 &manifest.sandbox,
                 &manifest.optimization.meta_llm,
                 &data_handling,
+                transcript.as_ref(),
             )
             .await
             .context("Evaluator execution failed")?;
@@ -231,6 +254,14 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 })
                 .map(|d| d.name.clone())
                 .collect();
+
+            // F5: remember which unit a failing evaluator blamed, so the rule
+            // can be scoped to it and the patch can say why.
+            failing_unit = eval_result
+                .details
+                .iter()
+                .find(|d| !d.success && d.attributed_unit.is_some())
+                .and_then(|d| d.attributed_unit.clone());
 
             if !indeterminate.is_empty() {
                 anyhow::bail!(
@@ -296,6 +327,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 blocked_by_regression: false,
                 quarantined,
                 provenance,
+                transcript,
+                rule_units,
                 budget_halt,
                 report: patch::ManifestReport {
                     manifest_name: manifest.name.clone(),
@@ -350,11 +383,24 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 );
             }
 
-            let new_rule = optimizer::run_llm_optimizer(
+            // F5: when the failure is attributable to a step, lead the
+            // optimizer with that narrow context so the rule can be scoped to
+            // it. The whole-run log still follows as context.
+            let localized = transcript
+                .as_ref()
+                .and_then(|t| t.render_localized_failure(failing_unit.as_deref()));
+            if localized.is_some() {
+                println!(
+                    "   🎯 Failure localized to a transcript step; the rule will be scoped to it."
+                );
+            }
+
+            let new_rule = optimizer::run_optimizer_with_context(
                 &manifest.optimization.meta_llm,
                 &stderr,
                 &manifest.task_prompt,
                 &optimizer_visible,
+                localized.as_deref(),
             )
             .await
             .with_context(|| {
@@ -369,7 +415,9 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
             }
 
             let mut proposed = existing_rules.clone();
-            proposed.push(Rule::behavioral(new_rule.clone()));
+            proposed.push(Rule::behavioral(new_rule.text.clone()));
+            // F5: which step motivated this rule, recorded for the patch.
+            rule_units.push(new_rule.unit.clone());
 
             // Enforce the rule policy before writing (F2): a protected rule the
             // optimizer dropped or altered is restored, never persisted as lost.
@@ -462,6 +510,8 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
         blocked_by_regression,
         quarantined,
         provenance,
+        transcript,
+        rule_units,
         budget_halt,
         report,
         manifest,
@@ -568,6 +618,10 @@ async fn main() -> Result<()> {
     let mut quarantined_rules: Vec<rules::QuarantinedChange> = Vec::new();
     // Set when a manifest stopped on a budget limit (F7).
     let mut run_budget_halt: Option<String> = None;
+    // The last transcript seen, for the patch artifact (F6a).
+    let mut final_transcript: Option<transcript::Transcript> = None;
+    // Which unit each rule addresses, for the patch (F5).
+    let mut rule_units: Vec<Option<String>> = Vec::new();
     // How each grader verdict was produced, for re-verifiability (F4a).
     let mut verdict_provenance: Vec<evaluator::VerdictProvenance> = Vec::new();
 
@@ -600,6 +654,10 @@ async fn main() -> Result<()> {
             let report = run.report;
             quarantined_rules.extend(run.quarantined);
             verdict_provenance.extend(run.provenance);
+            if let Some(t) = run.transcript {
+                final_transcript = Some(t);
+            }
+            rule_units.extend(run.rule_units);
             if let Some(reason) = run.budget_halt {
                 run_budget_halt.get_or_insert(reason);
             }
@@ -717,6 +775,8 @@ async fn main() -> Result<()> {
                             &rule_texts,
                             &quarantined_rules,
                             &verdict_provenance,
+                            final_transcript.as_ref(),
+                            &rule_units,
                         );
 
                         let patch_path = Path::new("neuroplasticity_patch.md");

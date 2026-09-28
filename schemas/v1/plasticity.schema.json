@@ -318,6 +318,20 @@
           "weight": {
             "type": "number",
             "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["example", "invariant"],
+            "description": "Default 'example': judges one outcome. 'invariant': judges a property that must hold across the whole run, which requires the agent to emit a transcript."
+          },
+          "unit": {
+            "type": "string",
+            "description": "Transcript step this evaluator judges, by stable id. A failure is attributed to that unit, and the rule the optimizer writes is scoped to it."
+          },
+          "assert": {
+            "type": "string",
+            "enum": ["no_action_after_failure", "at_most_once", "no_failed_steps"],
+            "description": "Required when kind is 'invariant'. Restricted to properties decidable from the ordered transcript alone, so invariants stay deterministic."
           }
         },
         "required": [
