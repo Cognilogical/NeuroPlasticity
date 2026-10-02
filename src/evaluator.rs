@@ -210,14 +210,21 @@ pub async fn evaluate(
                                         .any(|c| cmd_name.ends_with(&format!("/{}", c))));
 
                             if !is_safe {
+                                // PRINT the rejection (first-run defect 2026-10-01:
+                                // this path returned a failed score with NO output
+                                // anywhere, so an entire debugging session ran with
+                                // evaluators that never executed and nobody could
+                                // see why).
+                                let rejection = format!(
+                                    "Security Exception: host_bash command '{}' is not in the system allowlist (git, jq, cat, ls, grep, echo). Evaluators must use the container environment for arbitrary execution.",
+                                    cmd_name
+                                );
+                                println!("{}", rejection);
                                 return EvaluatorScore {
                                     name: eval_clone.name.clone(),
                                     success: false,
                                     weight: eval_clone.weight,
-                                    output: Some(format!(
-                                        "Security Exception: host_bash command '{}' is not in the system allowlist. Evaluators must use container environment for arbitrary execution.",
-                                        cmd_name
-                                    )),
+                                    output: Some(rejection),
                                     attributed_unit: None,
                                 };
                             }

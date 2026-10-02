@@ -88,6 +88,16 @@ pub async fn run_agent(
     cmd.arg("-e").arg("NONINTERACTIVE=1");
     cmd.arg("-e").arg("DEBIAN_FRONTEND=noninteractive");
 
+    // Manifest-declared env (sandbox.env): previously SILENTLY IGNORED — an
+    // author who put configuration here believed it was live. Non-secret
+    // configuration belongs here; secrets still belong in files the command
+    // sources itself, never in the committed manifest.
+    if let Some(env_map) = &sandbox.env {
+        for (k, v) in env_map {
+            cmd.arg("-e").arg(format!("{}={}", k, v));
+        }
+    }
+
     if let Some(mounts) = &sandbox.mounts {
         for mount in mounts {
             let expanded_source = shellexpand::tilde(&mount.source).to_string();

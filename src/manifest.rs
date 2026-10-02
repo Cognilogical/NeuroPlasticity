@@ -25,6 +25,12 @@ pub struct Sandbox {
     pub mounts: Option<Vec<MountConfig>>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    /// Environment variables passed into the sandbox container
+    /// (-e per entry). First-run defect 2026-10-01: an `env` block in the
+    /// manifest was SILENTLY IGNORED (serde default), so configuration the
+    /// author believed was live did nothing.
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

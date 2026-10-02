@@ -196,6 +196,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
 
         // Calculate run fingerprint
         let evaluators_json = serde_json::to_string(&manifest.evaluators).unwrap_or_default();
+        let sandbox_json = serde_json::to_string(&manifest.sandbox).unwrap_or_default();
         let fingerprint = fingerprint::calculate_fingerprint(
             agent_command,
             &target_rules_file,
@@ -209,6 +210,7 @@ async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
                 .as_deref()
                 .unwrap_or_default(),
             &evaluators_json,
+            &sandbox_json,
         );
 
         // Declared before the fast-path branch below: either the cache supplies
@@ -714,6 +716,19 @@ async fn main() -> Result<()> {
     let mut manifest_path_str = "plasticity.json".to_string();
     // Collected because std::env::Args is not Clone and the flags are read twice.
     let raw_args: Vec<String> = args.by_ref().collect();
+
+    // HELP GATE (first-run defect 2026-10-01): `--help` (and `-h`) previously
+    // fell through every branch below, defaulted the manifest path to
+    // plasticity.json, and STARTED A REAL RUN. Asking for help must never
+    // execute anything.
+    if raw_args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: NeuroPlasticity [test <manifest.json>] [--print-egress-plan] | verify-patch ...");
+        println!("  (no args)      runs ./plasticity.json");
+        println!("  test <path>    runs the manifest at <path>");
+        println!("  --help, -h     this message");
+        return Ok(());
+    }
+
     let print_egress_plan = raw_args.iter().any(|a| a == "--print-egress-plan");
 
     // `verify-patch` (F8): re-check that a patch still applies to its target.
@@ -800,6 +815,30 @@ async fn main() -> Result<()> {
         "Detected {} test manifest(s). Commencing execution...",
         queue.len()
     );
+
+    // Reap orphaned run containers from a previous orchestrator that was
+    // SIGKILLed (kill_on_drop cannot fire then). First-run defect 2026-10-01:
+    // a shell timeout killed the orchestrator and a neuro-run-* container kept
+    // running its sandbox budget with nobody watching. Best-effort: any engine.
+    for eng in ["podman", "docker"] {
+        if crate::container::check_cmd(eng).await {
+            if let Ok(out) = tokio::process::Command::new(eng)
+                .args(["ps", "-aq", "--filter", "name=neuro-run-"])
+                .output()
+                .await
+            {
+                let ids = String::from_utf8_lossy(&out.stdout);
+                for id in ids.lines().filter(|l| !l.trim().is_empty()) {
+                    println!("♻️  Reaping orphaned container {}", id.trim());
+                    let _ = tokio::process::Command::new(eng)
+                        .args(["rm", "-f", id.trim()])
+                        .output()
+                        .await;
+                }
+            }
+            break;
+        }
+    }
 
     // Filled in as manifests run; the patch is written from it at the end.
     let mut final_manifest: Option<manifest::PlasticityManifest> = None;

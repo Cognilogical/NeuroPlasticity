@@ -96,6 +96,7 @@ pub fn calculate_fingerprint(
     meta_model: &str,
     meta_base_url: &str,
     evaluators_serialized: &str,
+    sandbox_serialized: &str,
 ) -> String {
     let mut hasher = Sha256::new();
 
@@ -120,6 +121,11 @@ pub fn calculate_fingerprint(
     // failure from one backend must not be replayed against another.
     field("base_url", meta_base_url);
     field("evaluators", evaluators_serialized);
+    // The sandbox IS part of the execution: a cached failure from one
+    // base_image/timeout must never be replayed against another. (First-run
+    // defect 2026-10-01: changing golang:1.23-slim → 1.25-bookworm kept the
+    // old fingerprint, replaying a failure the new config could not have.)
+    field("sandbox", sandbox_serialized);
 
     // Hash the current rules state
     if target_rules_file.exists() {
