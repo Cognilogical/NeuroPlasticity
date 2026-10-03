@@ -33,11 +33,16 @@ retry-on-ramble, prompt-format drift).
 3. **It attacks the biggest real cost of running epochs.** keywest.health's
    NeuroPlasticity spend policy (2026-10-02) records ~$42 for one night of
    epochs (~$3-4 per 5-scenario epoch) because grading rides on live
-   conversational models. Jev on a free/cheap tier turns the *evaluation layer*
-   of an epoch into a near-$0 operation, leaving real spend only on the
-   conversations themselves. That is the difference between NeuroPlasticity as a
-   "deploy gate" and NeuroPlasticity as an iteration loop you can actually run
-   weekly.
+   conversational models. Making the *evaluation layer* cheap is what turns
+   NeuroPlasticity from a "deploy gate" into an iteration loop you can run
+   weekly. **Cost caveat (stated honestly):** TypeSafe's published docs carry NO
+   pricing page — the only quantified public datapoint is the batching cookbook
+   (https://docs.typesafe.ai/cookbooks/parallel_questions.md): 13 batched
+   questions in ONE call measured **12.2× cheaper and 10.0× faster than
+   separate calls, with no change in answers**. The owner reports Jev is
+   available on a free tier (unverified in docs). **Gate before scheduling:**
+   confirm actual per-judgment cost from the account dashboard or a billed
+   pilot; the headline benefit is aspirational until that number exists.
 4. **Grader quorums get a cheap default.** Jev as `primary` grader with a heavier
    model as `veto` is the natural configuration — and the existing κ (agreement)
    reporting between graders means adopting Jev is *measured by the framework's
@@ -59,8 +64,10 @@ Keep it minimal and consistent with `llm` evaluators:
     }
   },
   "mapping": {
-    "passes_rule": { "above": 0.75, "verdict": "PASS", "below": 0.35, "verdict": "FAIL" }
-  }
+    "pass_above": 0.75,
+    "fail_below": 0.35
+  },
+  "indeterminate_below": 0.5
 }
 ```
 
@@ -70,18 +77,39 @@ Semantics:
   the evaluator's `document` state. Independent questions run in parallel
   (TypeSafe composes them in one request where possible — their API batches
   independent judgments).
-- `mapping` converts a probability/answer to a verdict. Anything inside the
-  dead-band between `above` and `below` (or Confidence under a floor, config
-  `indeterminate_below`) yields `Verdict::Indeterminate`. Default dead-band:
-  0.35–0.75.
+- For a Noul: probability ≥ `pass_above` → `Verdict::Pass`; ≤ `fail_below` →
+  `Verdict::Fail`; anything in the dead-band between the two thresholds →
+  `Verdict::Indeterminate`. Additionally, the answer's own Confidence under
+  `indeterminate_below` forces `Indeterminate` regardless of the probability
+  band (calibrated certainty is a separate axis from probability — see
+  https://docs.typesafe.ai/confidence). Defaults if omitted: `pass_above` 0.75,
+  `fail_below` 0.35, `indeterminate_below` 0.5.
 - A Choice question's selected value can also route: `verdict_by_answer` with a
   per-answer verdict map, for graders that judge "which failure class is this?"
+- Validation: `pass_above > fail_below` is required (overlapping or inverted
+  bands must fail manifest parse, not grade epochs).
+
+## Implementation shape (explicit): a new `EvaluatorType`, NOT a provider branch
+
+**This must not be implemented as a `provider == "typesafe"` branch inside
+`llm_client.rs::complete_tracked`.** The `llm` evaluator's plumbing is
+chat-shaped (`CompletionSpec`, prose completion, verdict parsed from generated
+text) — forcing judgment questions through it would reconstruct the exact
+parse-failure class this feature exists to eliminate, and would lose batched
+typed judgments. The correct shape is a **new evaluator type** with its own
+request builder (TypeSafe's System One request payload) and its own response
+decoding (typed answers, not parsed prose). Shared concerns — fingerprinting,
+semaphore, quorum roles, egress plan, fail-loud aborts — are reused; the
+completion path is not.
 
 ## Integration points (all existing)
 
-- **Fingerprinting:** add the evaluator's provider (`typesafe`) + question IDs +
-  mapping to the failure fingerprint exactly as `meta_llm.provider/model/base_url`
-  are today — same failed-config cache, no new mechanics.
+- **Fingerprinting:** add the evaluator's provider (`typesafe`), the **full
+  serialized question text** (including interpolated rule text and criteria —
+  rewording a question changes the grader as much as changing thresholds, so it
+  must invalidate the failed-config cache), and the **mapping thresholds** to the
+  failure fingerprint exactly as `meta_llm.provider/model/base_url` are today —
+  same failed-config cache, no new mechanics.
 - **Semaphore:** TypeSafe is a cloud HTTP API; treat it like cloud providers
   (concurrency up to the existing 10), not the embedded-1 slot. A `typesafe`
   grader inside a quorum slots into `primary`/`veto`/`audit` unchanged.
@@ -115,16 +143,26 @@ Semantics:
 
 ## Suggested acceptance tests
 
-1. A manifest with one `typesafe` Noul grader over a recorded transcript
-   reproduces the same PASS/FAIL as the equivalent `llm` grader on clean data.
-2. A deliberately ambiguous document (transcript truncated mid-sentence) yields
-   `INDETERMINATE` (not FAIL) at the default dead-band, and the run halts per
-   existing INDETERMINATE policy.
-3. Grader quorum: `typesafe` primary + `llm` veto disagree → run records
-   INDETERMINATE with κ reported; agree → PASS with both verdicts in the
-   artifact.
-4. Failure fingerprint: same manifest + typesafe grader caches a known failure;
-   changing only the mapping thresholds invalidates the fingerprint (new config).
+1. **Smoke, clean data:** a manifest with one `typesafe` Noul grader over a
+   recorded transcript produces a well-formed verdict end-to-end (this proves
+   wiring only — agreement on clean data is nearly free for any grader and is
+   NOT the quality claim; quality lives in tests 3-4).
+2. **Boundary/ambiguity is the real test:** a deliberately ambiguous document
+   (transcript truncated mid-sentence, or a rule the transcript only half
+   satisfies) yields `INDETERMINATE` (not FAIL) — inside the dead-band, and via
+   forced-`Indeterminate` when Confidence < `indeterminate_below`. The run halts
+   per existing INDETERMINATE policy.
+3. **Grader quorum + κ is the informative agreement test:** `typesafe` primary +
+   `llm` veto graded over a corpus of BOUNDARY cases (deliberately including
+   marginal passes and marginal fails, not just obvious ones), with raw
+   agreement % and Cohen's κ reported per epoch. Agreement on obvious cases is
+   free and uninformative; the κ on the boundary band is the evidence that Jev
+   grades like the incumbent grader where it matters. A disagreement yields
+   INDETERMINATE with both verdicts in the artifact.
+4. **Failure fingerprint:** same manifest + typesafe grader caches a known
+   failure; changing ONLY the question wording invalidates the fingerprint
+   (question text is fingerprint material); changing ONLY the mapping
+   thresholds also invalidates it (new grader configuration).
 5. `--print-egress-plan` lists the TypeSafe endpoint and the document data class.
 6. Endpoint unreachable → run aborts with diagnostic; no verdict recorded, no
    rule written.
