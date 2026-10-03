@@ -79,11 +79,20 @@ Semantics:
   independent judgments).
 - For a Noul: probability ≥ `pass_above` → `Verdict::Pass`; ≤ `fail_below` →
   `Verdict::Fail`; anything in the dead-band between the two thresholds →
-  `Verdict::Indeterminate`. Additionally, the answer's own Confidence under
-  `indeterminate_below` forces `Indeterminate` regardless of the probability
-  band (calibrated certainty is a separate axis from probability — see
-  https://docs.typesafe.ai/confidence). Defaults if omitted: `pass_above` 0.75,
-  `fail_below` 0.35, `indeterminate_below` 0.5.
+  `Verdict::Indeterminate`. **Noul answers carry NO separate confidence field**
+  (verified from https://docs.typesafe.ai/confidence: "Noul answers don't carry
+  one" — the probability itself is the uncertainty; p near 0.5 IS unsure). So
+  for Noul, `indeterminate_below` does not apply: the dead-band IS the
+  uncertainty signal. (If a single confidence-scale gate across all primitives
+  is wanted anyway, the docs' own suggestion is the derived
+  `|2p − 1|` — same scale as Choice confidence.)
+- For Choice and Score answers, which DO carry a `confidence` property
+  (a 0–1 collapse of the probability-distribution shape, exact formulas in the
+  docs): Confidence under `indeterminate_below` forces `Indeterminate` even if
+  the probability band alone would pass — distribution shape catches cases the
+  point-probability misses (e.g. a Score torn between adjacent levels).
+  Defaults if omitted: `pass_above` 0.75, `fail_below` 0.35,
+  `indeterminate_below` 0.5.
 - A Choice question's selected value can also route: `verdict_by_answer` with a
   per-answer verdict map, for graders that judge "which failure class is this?"
 - Validation: `pass_above > fail_below` is required (overlapping or inverted
@@ -116,6 +125,16 @@ completion path is not.
 - **Fail loud:** HTTP errors / auth failures from the TypeSafe API abort the run
   with a diagnostic, same as an unreachable llm endpoint — an evaluator
   infrastructure failure must never become an agent FAIL.
+- **Record/replay for tests (REQUIRED, not optional).** The framework is
+  paranoid about determinism and cost; acceptance tests that call the live
+  TypeSafe API would be neither. Tests 1-4 MUST run against **recorded-response
+  fixtures** (cassettes): first contact with the live API records the full
+  request/response (typed answers, probabilities, confidence) to a fixture
+  file; subsequent runs replay it. A fixture/dry-run mode keeps `cargo test`
+  free and reproducible, and a changed question/mapping that invalidates the
+  fingerprint also invalidates the cassette (same rule as the failure
+  fingerprint cache). Live-API runs are the deliberate-spend exception, exactly
+  like lane runs.
 - **Egress plan:** a `typesafe` evaluator participates in the declared data-class
   egress plan like any other cloud provider (`--print-egress-plan` must show the
   outbound path: document text → TypeSafe endpoint).
@@ -143,22 +162,35 @@ completion path is not.
 
 ## Suggested acceptance tests
 
+**Prerequisite (likely the largest work item — larger than the code): build the
+boundary corpus.** The repo has NO recorded transcripts with known-marginal
+labels today. Test 3's evidence value depends entirely on this corpus:
+transcripts that sit NEAR the boundary — marginal passes, marginal fails,
+truncations, half-satisfied rules — each with a human-confirmed label
+(PASS/FAIL/INDETERMINATE). Budget it as a first-class task: curate from existing
+`.neuroplasticity/runs/` artifacts, hand-label, and version the labels. A
+boundary corpus without confirmed labels would make the κ number decorative.
+
+**All tests run against recorded-response fixtures (cassettes), never the live
+API** — free and reproducible per the record/replay requirement above.
+
 1. **Smoke, clean data:** a manifest with one `typesafe` Noul grader over a
-   recorded transcript produces a well-formed verdict end-to-end (this proves
-   wiring only — agreement on clean data is nearly free for any grader and is
-   NOT the quality claim; quality lives in tests 3-4).
-2. **Boundary/ambiguity is the real test:** a deliberately ambiguous document
-   (transcript truncated mid-sentence, or a rule the transcript only half
-   satisfies) yields `INDETERMINATE` (not FAIL) — inside the dead-band, and via
-   forced-`Indeterminate` when Confidence < `indeterminate_below`. The run halts
-   per existing INDETERMINATE policy.
+   recorded transcript produces a well-formed verdict end-to-end (proves wiring
+   only — agreement on clean data is nearly free for any grader and is NOT the
+   quality claim; quality lives in test 3).
+2. **Boundary/ambiguity is the real test:** boundary-corpus items that are
+   deliberately ambiguous (transcript truncated mid-sentence, or a rule the
+   transcript only half satisfies) yield `INDETERMINATE` (not FAIL): for Noul,
+   via the probability dead-band; for Choice/Score, also via
+   Confidence < `indeterminate_below`. The run halts per existing INDETERMINATE
+   policy.
 3. **Grader quorum + κ is the informative agreement test:** `typesafe` primary +
-   `llm` veto graded over a corpus of BOUNDARY cases (deliberately including
-   marginal passes and marginal fails, not just obvious ones), with raw
-   agreement % and Cohen's κ reported per epoch. Agreement on obvious cases is
-   free and uninformative; the κ on the boundary band is the evidence that Jev
-   grades like the incumbent grader where it matters. A disagreement yields
-   INDETERMINATE with both verdicts in the artifact.
+   `llm` veto graded over the **boundary corpus** (marginal passes and marginal
+   fails — NOT obvious cases, which both graders pass for free and which prove
+   nothing), with raw agreement % and Cohen's κ reported per epoch. A
+   disagreement yields INDETERMINATE with both verdicts in the artifact. The κ
+   on the boundary band is the evidence that Jev grades like the incumbent
+   grader where it matters.
 4. **Failure fingerprint:** same manifest + typesafe grader caches a known
    failure; changing ONLY the question wording invalidates the fingerprint
    (question text is fingerprint material); changing ONLY the mapping
