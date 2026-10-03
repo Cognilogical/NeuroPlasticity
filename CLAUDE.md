@@ -73,7 +73,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full walkthrough. Key p
 
 - `src/main.rs` — CLI entry, the epoch/waterfall loop, and the final patch writer.
 - `src/runner.rs` — Podman/Docker sandbox execution, the hybrid `/project` (ro) + `/workspace` (rw) workspace, and the ephemeral `/user_home`.
-- `src/evaluator.rs` — Tri-State Evaluators, run concurrently under a semaphore. LLM verdicts are JSON Schema output; infrastructure errors abort the run.
+- `src/evaluator.rs` — Tri-State Evaluators, run concurrently under a semaphore. LLM verdicts are JSON Schema output; infrastructure errors abort the run. `type: "typesafe"` graders use TypeSafe's Jev judgment models (typed answers + probabilities, verdict mapped by configured bands); `src/typesafe.rs` is the client, with record/replay cassettes via `NEUROPLASTICITY_TYPESAFE_CASSETTES` so tests never touch the network.
 - `src/optimizer.rs` — Meta-Optimizer. Returns a structured `{"rule": ...}` that is sanitized, length-capped, and de-duplicated before being persisted.
 - `src/llm_client.rs` — the single request path for `custom` providers: deadline, retries, provider-error surfacing, and both `chat/completions` and `responses` wire formats.
 - `src/rules.rs` — the rules-file model (`behavioral` / `constraint`) and the protected-rule policy. A protected rule is hidden from the optimizer, and an attempted change is reverted and quarantined.

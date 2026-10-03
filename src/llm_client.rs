@@ -204,6 +204,25 @@ async fn resolve_endpoint(config: &MetaLlmConfig) -> Result<(String, Option<Stri
         .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
     let env_var = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
 
+    let token = resolve_api_key(env_var, &url)?;
+
+    Ok((url, token))
+}
+
+/// Resolve the bearer token for an `api_key_env` name, enforcing the
+/// credential-name security guard.
+///
+/// Shared with the TypeSafe client (`crate::typesafe`) so *every* provider
+/// that reads a manifest-named environment variable validates it identically:
+/// a malicious manifest must not be able to point any provider at
+/// `AWS_SECRET_ACCESS_KEY` or `SSH_PRIVATE_KEY` and have the orchestrator
+/// echo it to a remote endpoint.
+///
+/// Returns `Ok(None)` only for loopback endpoints (llama-server, Ollama, …)
+/// with an empty key — nothing leaves the machine there, so no credential is
+/// required. Anywhere else an empty key is a hard error: running a grader
+/// without its credential would surface later as confusing 401s.
+pub fn resolve_api_key(env_var: &str, url: &str) -> Result<Option<String>> {
     // P0 Security Fix: Prevent exfiltration of arbitrary host env vars (like AWS_SECRET_ACCESS_KEY or SSH_PRIVATE_KEY) via malicious plasticity.json
     // Hardened: Must exactly match known patterns, not just suffixes
     let is_valid_env_var = env_var == "API_KEY"
@@ -242,7 +261,7 @@ async fn resolve_endpoint(config: &MetaLlmConfig) -> Result<(String, Option<Stri
     // Loopback servers (llama-server, Ollama, LM Studio, vLLM) need no credential.
     // The env var *name* is still validated above, so this does not widen the
     // exfiltration guard: nothing is sent off-box either way.
-    if api_key.is_empty() && !is_loopback(&url) {
+    if api_key.is_empty() && !is_loopback(url) {
         anyhow::bail!("API key environment variable {} is empty.", env_var);
     }
 
@@ -252,7 +271,7 @@ async fn resolve_endpoint(config: &MetaLlmConfig) -> Result<(String, Option<Stri
         Some(api_key)
     };
 
-    Ok((url, token))
+    Ok(token)
 }
 
 /// True when the URL targets the local machine only.

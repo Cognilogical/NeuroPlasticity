@@ -191,6 +191,11 @@ pub fn check_egress(handling: &DataHandling, provider: &str, kind: EgressKind) -
 /// Which providers a manifest's calls would use, without executing anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EgressPlanEntry {
+    /// How this row is printed: `kind.label()` for the two built-in paths,
+    /// `typesafe evaluator` for a per-endpoint TypeSafe path — the `kind`
+    /// itself stays `Grader` so the policy check is shared with every other
+    /// grader rather than reimplemented.
+    pub label: String,
     pub kind: EgressKind,
     pub provider: EgressProvider,
     pub allowed: bool,
@@ -209,8 +214,10 @@ pub fn build_plan(
             continue;
         }
         let decision = check_egress(handling, meta_llm_provider, kind);
+        let label = kind.label().to_string();
         plan.push(match decision {
             EgressDecision::Allowed { provider, .. } => EgressPlanEntry {
+                label,
                 kind,
                 provider,
                 allowed: true,
@@ -226,6 +233,7 @@ pub fn build_plan(
                 data_class,
                 ..
             } => EgressPlanEntry {
+                label,
                 kind,
                 provider,
                 allowed: false,
@@ -239,6 +247,55 @@ pub fn build_plan(
         });
     }
     plan
+}
+
+/// The TypeSafe rows of the plan: one per distinct endpoint document text
+/// would be posted to (design §Integration points: "`--print-egress-plan`
+/// must show the outbound path: document text → TypeSafe endpoint").
+///
+/// `typesafe` already classifies as Hosted through `provider_kind`, so there
+/// is no egress-provider variant to keep in sync — the ALLOWED/DENIED
+/// decision is the same `check_egress` every other path takes, and is
+/// therefore inert until the manifest declares a `data_class`.
+pub fn build_typesafe_plan(handling: &DataHandling, endpoints: &[String]) -> Vec<EgressPlanEntry> {
+    let class_label = handling
+        .data_class
+        .map(|c| c.label())
+        .unwrap_or("unclassified");
+    endpoints
+        .iter()
+        .map(|base_url| {
+            let path = format!("{}/v1/systemone", base_url.trim_end_matches('/'));
+            let detail = format!("document text → {}, data class: {}", path, class_label);
+            match check_egress(handling, "typesafe", EgressKind::Grader) {
+                EgressDecision::Allowed { provider, .. } => EgressPlanEntry {
+                    label: "typesafe evaluator".to_string(),
+                    kind: EgressKind::Grader,
+                    provider,
+                    allowed: true,
+                    reason: detail,
+                },
+                EgressDecision::Denied {
+                    provider,
+                    reason,
+                    data_class,
+                    ..
+                } => EgressPlanEntry {
+                    label: "typesafe evaluator".to_string(),
+                    kind: EgressKind::Grader,
+                    provider,
+                    allowed: false,
+                    reason: format!(
+                        "{}; {} data to a {} provider: {}",
+                        detail,
+                        data_class.label(),
+                        provider.label(),
+                        reason
+                    ),
+                },
+            }
+        })
+        .collect()
 }
 
 /// Fail loud on a denied call, naming the provider, the class, and the remedy.
@@ -268,10 +325,15 @@ pub fn enforce_egress(handling: &DataHandling, provider: &str, kind: EgressKind)
 
 /// Human-readable plan of which providers a run would use, before any container
 /// starts.
+///
+/// `typesafe_endpoints` are the distinct TypeSafe base URLs this manifest
+/// would post document text to; the plan lists every one of them so the
+/// outbound path is visible without running anything.
 pub fn render_egress_plan(
     handling: &DataHandling,
     meta_llm_provider: &str,
     has_llm_evaluators: bool,
+    typesafe_endpoints: &[String],
 ) -> String {
     let mut out = String::from("Egress plan\n===========\n");
     out.push_str(&format!(
@@ -283,10 +345,14 @@ pub fn render_egress_plan(
     ));
     out.push_str(&format!("meta_llm provider: {}\n\n", meta_llm_provider));
 
-    for entry in build_plan(handling, meta_llm_provider, has_llm_evaluators) {
+    let entries = build_plan(handling, meta_llm_provider, has_llm_evaluators);
+    for entry in entries
+        .into_iter()
+        .chain(build_typesafe_plan(handling, typesafe_endpoints))
+    {
         out.push_str(&format!(
             "  {:<17} {} → {}{}\n",
-            entry.kind.label(),
+            entry.label,
             entry.provider.label(),
             if entry.allowed { "ALLOWED" } else { "DENIED " },
             format!(" ({})", entry.reason)
@@ -298,6 +364,7 @@ pub fn render_egress_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::TYPESAFE_DEFAULT_BASE_URL;
 
     fn handling(class: DataClass, allow: &[(&str, DataClass)]) -> DataHandling {
         DataHandling {
@@ -441,7 +508,7 @@ mod tests {
         assert!(check_egress(&h, "custom", EgressKind::Grader).is_allowed());
         assert!(check_egress(&h, "custom", EgressKind::Optimizer).is_allowed());
 
-        let plan = render_egress_plan(&h, "custom", true);
+        let plan = render_egress_plan(&h, "custom", true, &[]);
         assert!(plan.contains("meta-optimizer"), "{}", plan);
         assert!(plan.contains("llm evaluator"), "{}", plan);
     }
@@ -449,14 +516,14 @@ mod tests {
     #[test]
     fn plan_shows_denial_before_a_run_starts() {
         let h = handling(DataClass::Regulated, &[("embedded", DataClass::Regulated)]);
-        let plan = render_egress_plan(&h, "custom", true);
+        let plan = render_egress_plan(&h, "custom", true, &[]);
         assert!(plan.contains("DENIED"), "{}", plan);
         assert!(plan.contains("regulated"), "{}", plan);
     }
 
     #[test]
     fn unclassified_plan_says_so() {
-        let plan = render_egress_plan(&DataHandling::default(), "embedded", false);
+        let plan = render_egress_plan(&DataHandling::default(), "embedded", false, &[]);
         assert!(plan.contains("unclassified"), "{}", plan);
         assert!(plan.contains("ALLOWED"), "{}", plan);
     }
@@ -480,6 +547,65 @@ mod tests {
             plan.iter().all(|e| e.allowed),
             "an embedded provider sends nothing off-box: {:?}",
             plan
+        );
+    }
+
+    // --- TypeSafe rows (design acceptance test 5) ---
+
+    #[test]
+    fn the_plan_shows_the_typesafe_outbound_path() {
+        let h = handling(DataClass::Internal, &[("hosted", DataClass::Internal)]);
+        let plan = render_egress_plan(
+            &h,
+            "embedded",
+            true,
+            &[TYPESAFE_DEFAULT_BASE_URL.to_string()],
+        );
+        assert!(plan.contains("typesafe evaluator"), "{}", plan);
+        assert!(
+            plan.contains(&format!("{}/v1/systemone", TYPESAFE_DEFAULT_BASE_URL)),
+            "{}",
+            plan
+        );
+        assert!(plan.contains("document text"), "{}", plan);
+        assert!(plan.contains("data class: internal"), "{}", plan);
+        assert!(plan.contains("ALLOWED"), "{}", plan);
+    }
+
+    #[test]
+    fn the_typesafe_row_is_denied_when_the_class_exceeds_the_ceiling() {
+        // `restricted` data to an unlisted hosted endpoint: the row is the
+        // plan's way of showing the refusal before anything is sent.
+        let h = handling(DataClass::Restricted, &[("hosted", DataClass::Internal)]);
+        let plan = build_typesafe_plan(&h, &[TYPESAFE_DEFAULT_BASE_URL.to_string()]);
+        assert_eq!(plan.len(), 1);
+        assert!(!plan[0].allowed);
+        assert_eq!(plan[0].provider, EgressProvider::Hosted);
+        assert_eq!(plan[0].label, "typesafe evaluator");
+        assert!(plan[0].reason.contains("restricted"), "{:?}", plan[0]);
+        assert!(plan[0].reason.contains("/v1/systemone"), "{:?}", plan[0]);
+    }
+
+    #[test]
+    fn the_typesafe_row_is_inert_without_a_data_class() {
+        let plan = build_typesafe_plan(&DataHandling::default(), &["https://zen.example".into()]);
+        assert!(plan[0].allowed, "{:?}", plan[0]);
+        assert!(plan[0].reason.contains("unclassified"), "{:?}", plan[0]);
+        assert!(
+            plan[0].reason.contains("https://zen.example/v1/systemone"),
+            "{:?}",
+            plan[0]
+        );
+        // A trailing slash is tolerated so a hand-written base_url cannot
+        // produce a doubled path.
+        let slashed =
+            build_typesafe_plan(&DataHandling::default(), &["https://zen.example/".into()]);
+        assert!(
+            slashed[0]
+                .reason
+                .contains("https://zen.example/v1/systemone"),
+            "{:?}",
+            slashed[0]
         );
     }
 }

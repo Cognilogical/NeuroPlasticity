@@ -25,6 +25,7 @@ If a user told you to build a testing gym for yourself, you are in the right pla
 
 *   **Automated Self-Healing:** The Meta-Optimizer dynamically patches failing agents by analyzing evaluation logs and injecting targeted behavioral constraints.
 *   **⚡ Massive Parallel Evaluation:** All Tri-State Evaluators execute concurrently via asynchronous task spawning. Grading an epoch takes only as long as your single slowest test.
+*   **Near-$0 Judgments via TypeSafe (Jev):** A `typesafe` grader costs $0.042/Mtok of input tokens (output free) — or $0 on the owner's OpenCode Zen subscription — so the evaluation layer of an epoch is effectively free while the expensive conversational models stay where they belong: driving the agent.
 *   **⚡ Deterministic Failure Fingerprinting (Fast Path Cache):** NeuroPlasticity deterministically hashes your `manifest.name`, `agent_command`, target rules, optimizer model, and evaluators. If a known failure configuration is detected, it instantly skips the 120s container execution, loading cached side-effects and feeding them back to the optimizer.
 *   **🛡️ Container Safety & Timeouts:** Built-in asynchronous SIGTERM/SIGINT trapping and configurable `timeout_seconds` prevent reasoning models from hanging your CI pipelines or leaving orphaned Podman containers.
 *   **Hybrid Workspace (Zero-Copy):** Agents execute inside secure, rootless **Podman** containers. The host project is mounted as Read-Only (`/project:ro`) to guarantee safety, while the agent works in an ephemeral Read-Write scratch directory (`/workspace:rw`), eliminating slow deep-copies.
@@ -44,6 +45,7 @@ If a user told you to build a testing gym for yourself, you are in the right pla
     1. `host_bash`: Fast, lightweight POSIX shell commands running locally.
     2. `container`: Isolated evaluation containers for heavy dependencies (Node.js, `pytest`, etc.) without host pollution.
     3. `llm`: Schema-constrained prompt grading for nuanced checks (tone, style), returning a structured `{"verdict": "PASS"|"FAIL"|"INDETERMINATE", "reason": "..."}` object. Uses whichever model `optimization.meta_llm` points at, embedded or hosted, optionally across a quorum of graders. An `INDETERMINATE` is excluded from scoring and halts the run rather than becoming a rule.
+    4. `typesafe`: Judgment-model grading via **TypeSafe's System One models ("Jev")** — typed questions (Noul / Choice / Score) over a document, answered with schema-constrained probabilities instead of parsed prose. The verdict is mapped by configured bands (`pass_above` / `fail_below`), so a probability in the dead-band is INDETERMINATE by measurement, not by grader vibes. Configurable `base_url` (default `https://api.typesafe.ai`; point it at the OpenCode Zen gateway for a subscription free tier), pinned model (`jev-1.13.0`), optional load-time `"fallback": "llm"` when no API key is present, and offline record/replay cassettes for deterministic tests.
 
 ## ⚡ How It Works
 
@@ -159,13 +161,48 @@ Notes:
 }
 ```
 
-  Set `api_style` to `"chat_completions"` or `"responses"` explicitly to override the inference. The `claude-*` (`/v1/messages`) and `jev-*` (`/v1/systemone`) families use different protocols and are not supported.
+  Set `api_style` to `"chat_completions"` or `"responses"` explicitly to override the inference. The `claude-*` (`/v1/messages`) family uses a different protocol and is not supported as a `meta_llm`; the `jev-*` family is supported through the dedicated `typesafe` **evaluator** (below), not through `meta_llm`.
 - Grader verdicts and optimizer rules are requested as JSON Schema. Providers that reject `response_format` (or `text.format`) are detected from the 400 response and the constraint is dropped automatically, falling back to a prompt-only contract.
 - An LLM evaluator that cannot be reached (bad key, dead endpoint) aborts the run instead of counting as an agent failure. A framework that penalizes the agent for its own infrastructure problems produces meaningless rules.
 - `temperature` defaults to `0.0` for reproducible grading. Providers that reject it are detected from the 400 response and the field is dropped automatically, so reasoning models work too.
 - Changing `provider`, `model`, or `base_url` invalidates the failure-fingerprint cache, so a new backend never replays another backend's cached verdicts.
 - To test an endpoint without a real key, use the ignored round-trip test:
   `NP_TEST_BASE_URL=https://opencode.ai/zen/v1/chat/completions NP_TEST_API_KEY_ENV=OPENCODE_API_KEY cargo test --release --features embedded-llm -- --ignored custom_endpoint`
+
+
+### Cheap judgment-model grading (TypeSafe / Jev)
+
+For graders that only need a *decision* — does this transcript comply with the rule? — a `typesafe` evaluator asks TypeSafe's System One models ("Jev") typed questions (Noul yes/no, Choice, Score) and gets schema-constrained answers with calibrated probabilities. There is no prose to parse: the verdict is mapped from the measured probability by configured bands, and an answer inside the dead-band (or below the confidence floor) is INDETERMINATE by measurement.
+
+```json
+{
+  "name": "Summary complies with rules (TypeSafe Jev)",
+  "type": "typesafe",
+  "base_url": "https://api.typesafe.ai",
+  "model": "jev-1.13.0",
+  "target_file": "/workspace/summary.json",
+  "questions": {
+    "passes_rule": {
+      "primitive": "noul",
+      "question": "Does the document comply with the rule: no first-person pronouns?",
+      "criteria": {
+        "true": "The document uses no first-person pronouns",
+        "false": "At least one first-person pronoun appears"
+      }
+    }
+  },
+  "mapping": { "pass_above": 0.75, "fail_below": 0.35 },
+  "weight": 1.0
+}
+```
+
+- **Endpoint:** `base_url` defaults to `https://api.typesafe.ai`. Jev is also served through the **OpenCode Zen** subscription — point `base_url` at that gateway to grade for free. The API key comes from `TYPESAFE_API_KEY` (or `api_key_env`).
+- **Model:** `jev-1.13.0` by default, deliberately pinned. Avoid `jev-latest` in committed manifests: the alias can silently move to a newer model and change the grader with no local diff. The resolved version that actually answered is recorded in the verdict provenance.
+- **INDETERMINATE by measurement:** Noul answers carry no separate confidence — the probability itself is the uncertainty, and the dead-band between `fail_below` (default 0.35) and `pass_above` (default 0.75) IS the INDETERMINATE signal. Choice/Score answers additionally carry a confidence; below `indeterminate_below` (default 0.5) the verdict is forced to INDETERMINATE. Several questions combine as a conjunction: any FAIL fails, all PASS passes, otherwise INDETERMINATE.
+- **Quorums:** a grader in the `graders` array can carry its own `typesafe` block (with its own questions and endpoint), mixing judgment-model votes with `llm` votes in one quorum. A cheap Jev `primary` with a heavy `llm` `veto` is the natural configuration; disagreement still yields INDETERMINATE with κ reported.
+- **Fallback:** `"fallback": "llm"` converts the evaluator to the equivalent `llm` grader at manifest load when no API key is present — decided once, before any epoch, never mid-run. Without `fallback`, a missing key aborts the run loudly.
+- **Deterministic tests:** set `NEUROPLASTICITY_TYPESAFE_CASSETTES=<dir>` and every request is recorded to (or replayed from) a cassette keyed by the exact request — so `cargo test` never touches the network.
+- **Fingerprinting:** the questions text, mapping thresholds, `base_url`, and model are all fingerprint material — rewording a question invalidates the failed-config cache, exactly as changing an `llm` prompt does.
 
 
 ### What Happens:

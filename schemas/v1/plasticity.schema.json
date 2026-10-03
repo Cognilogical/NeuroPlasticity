@@ -294,9 +294,72 @@
             "enum": [
               "host_bash",
               "container",
-              "llm"
+              "llm",
+              "typesafe"
             ],
             "default": "host_bash"
+          },
+          "document": {
+            "type": "string",
+            "description": "TypeSafe evaluators only. Template for the state text the judgment model judges. Supports {{run.transcript}} and {{target_file}}. Absent: the evaluator's target_file content is used as-is."
+          },
+          "questions": {
+            "type": "object",
+            "description": "TypeSafe evaluators only. One typed judgment (noul / choice / score) per entry, evaluated over the document in a single batched request. Required for type 'typesafe'.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "primitive": {
+                  "type": "string",
+                  "enum": ["noul", "choice", "score"],
+                  "description": "noul: yes/no probability. choice: pick from criteria options. score: weighted position on ordered criteria levels."
+                },
+                "question": {
+                  "type": "string",
+                  "description": "The complete, self-contained question."
+                },
+                "criteria": {
+                  "description": "noul: object with 'true'/'false' descriptions. choice: map of option to description. score: ordered array of level descriptions (2-10 levels)."
+                }
+              },
+              "required": ["primitive", "question"],
+              "additionalProperties": false
+            }
+          },
+          "mapping": {
+            "type": "object",
+            "description": "TypeSafe evaluators only. Verdict bands and per-answer routing. Defaults: pass_above 0.75, fail_below 0.35. pass_above must be greater than fail_below.",
+            "properties": {
+              "pass_above": { "type": "number", "description": "Probability at or above this is PASS." },
+              "fail_below": { "type": "number", "description": "Probability at or below this is FAIL; between the bands is INDETERMINATE." },
+              "verdict_by_answer": {
+                "type": "object",
+                "description": "Choice routing: selected option to PASS/FAIL/INDETERMINATE. Unmapped options yield INDETERMINATE.",
+                "additionalProperties": { "type": "string", "enum": ["PASS", "FAIL", "INDETERMINATE"] }
+              }
+            },
+            "additionalProperties": false
+          },
+          "indeterminate_below": {
+            "type": "number",
+            "description": "TypeSafe evaluators only. Confidence floor for choice/score answers: below it the verdict is forced to INDETERMINATE. Noul answers carry no confidence, so this does not apply to them. Default 0.5."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "TypeSafe evaluators only. Endpoint base URL. Default https://api.typesafe.ai; set to the OpenCode Zen gateway to use a subscription free tier."
+          },
+          "model": {
+            "type": "string",
+            "description": "TypeSafe evaluators only. Model ID. Default jev-1.13.0 (pinned). Avoid the jev-latest alias: it can move to a newer model with no local change."
+          },
+          "api_key_env": {
+            "type": "string",
+            "description": "TypeSafe evaluators only. Env var holding the API key. Default TYPESAFE_API_KEY."
+          },
+          "fallback": {
+            "type": "string",
+            "enum": ["llm"],
+            "description": "TypeSafe evaluators only. Load-time fallback: when the API key is missing, the evaluator resolves to the equivalent llm grader for the whole run (decided once, before any epoch)."
           },
           "script": {
             "type": "array",
@@ -374,6 +437,44 @@
                 "prompt": {
                   "type": "string",
                   "description": "Grading criterion for this grader, if it should differ from the evaluator's own prompt."
+                },
+                "typesafe": {
+                  "type": "object",
+                  "description": "TypeSafe (System One / Jev) grader configuration, making this grader a judgment-model vote instead of an llm call. Shares the evaluator's document; may be mixed with llm graders in one quorum.",
+                  "properties": {
+                    "questions": {
+                      "type": "object",
+                      "description": "One typed judgment (noul / choice / score) per entry. Required.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "primitive": { "type": "string", "enum": ["noul", "choice", "score"] },
+                          "question": { "type": "string" },
+                          "criteria": {}
+                        },
+                        "required": ["primitive", "question"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "mapping": {
+                      "type": "object",
+                      "properties": {
+                        "pass_above": { "type": "number" },
+                        "fail_below": { "type": "number" },
+                        "verdict_by_answer": {
+                          "type": "object",
+                          "additionalProperties": { "type": "string", "enum": ["PASS", "FAIL", "INDETERMINATE"] }
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "indeterminate_below": { "type": "number" },
+                    "base_url": { "type": "string" },
+                    "model": { "type": "string" },
+                    "api_key_env": { "type": "string" }
+                  },
+                  "required": ["questions"],
+                  "additionalProperties": false
                 }
               },
               "required": ["name"],

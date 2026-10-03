@@ -133,6 +133,9 @@ flowchart TD
     
     Eval -->|type: llm| L[Meta-Optimizer LLM]
     L -.-> LD[Feeds the document to the configured model.<br>Schema-constrained JSON grading.<br><i>e.g., Checking tone, pronouns, structural intent.</i>]
+
+    Eval -->|type: typesafe| TS[TypeSafe Judgment Model]
+    TS -.-> TSD[Typed questions answered with<br>calibrated probabilities over a document.<br><i>e.g., Does this transcript comply with the rule?</i>]
 ```
 
 ### LLM Evaluators Return Structured JSON
@@ -143,8 +146,19 @@ A reply that does not parse as JSON is retried rather than scored, so a rambling
 
 **Infrastructure failures are not agent failures.** If the model endpoint is unreachable, the key is rejected, or the reply cannot be parsed after all retries, the run aborts with a diagnostic. Scoring that as an evaluator failure would let an expired API key drive the optimizer to "fix" an agent that was never broken, and would cache that bogus failure under a fingerprint.
 
+### TypeSafe (System One / Jev) Evaluators
+
+A `typesafe` evaluator asks TypeSafe's System One models ("Jev") **typed questions** — Noul (yes/no), Choice, Score — over a document, and receives schema-constrained answers with calibrated probabilities. Jev never generates prose, so the parse-failure class above cannot exist: the answer is typed at the API boundary, and the verdict maps mechanically from the measured probability.
+
+*   **INDETERMINATE by measurement.** A Noul probability between `fail_below` (0.35) and `pass_above` (0.75) is INDETERMINATE by construction. Noul answers carry no separate confidence — the probability itself is the uncertainty. Choice and Score answers also carry a confidence; below `indeterminate_below` (0.5) the verdict is forced to INDETERMINATE. Several questions combine as a conjunction.
+*   **Configurable endpoint.** `base_url` defaults to `https://api.typesafe.ai` and can point at the OpenCode Zen gateway for subscription-based free grading. The model is pinned (`jev-1.13.0`), because the `jev-latest` alias can silently change the grader.
+*   **Load-time fallback.** `"fallback": "llm"` converts the evaluator to the equivalent `llm` grader for the whole run when no API key resolves — decided once before any epoch, never mid-run, so κ between graders stays comparable.
+*   **Offline cassettes.** Setting `NEUROPLASTICITY_TYPESAFE_CASSETTES=<dir>` records each request/response to a cassette keyed by the exact request and replays it thereafter, so tests never touch the network.
+*   **Quorums.** A grader in the `graders` array can carry its own `typesafe` block, mixing judgment-model votes with `llm` votes; disagreement still resolves to INDETERMINATE with κ reported.
+*   **Fingerprinting.** Question text, mapping thresholds, `base_url`, and model all serialize into the evaluator set, so any change to them invalidates the failed-config cache.
+
 ### The LLM Semaphore
-Because executing 5 LLM evaluators simultaneously using local `llama.cpp` would instantly OOM crash a machine, NeuroPlasticity uses an `Arc<Semaphore>`. If `provider == "embedded"`, LLM concurrency is strictly limited to 1 (queueing safely). Cloud providers (custom OpenAI-compatible endpoints) scale up to 10 concurrent requests to maximize speed.
+Because executing 5 LLM evaluators simultaneously using local `llama.cpp` would instantly OOM crash a machine, NeuroPlasticity uses an `Arc<Semaphore>`. If `provider == "embedded"`, LLM concurrency is strictly limited to 1 (queueing safely). Cloud providers (custom OpenAI-compatible endpoints, and `typesafe` — which is endpoint-only, never embeddable) scale up to 10 concurrent requests to maximize speed.
 
 ---
 
@@ -174,6 +188,8 @@ The former `github` provider was removed: GitHub Models was retired on 2026-07-3
 ### Two Wire Protocols
 
 `custom` speaks both `chat/completions` and `responses`. The style is taken from `api_style`, or inferred from a `base_url` ending in `/responses`. Responses-API output is parsed from the `output[]` array, skipping `reasoning` and tool-call items so only `output_text` is treated as the completion.
+
+Judgment models (`jev-*`) do not route through `meta_llm` — their native protocol is a different endpoint entirely, served by the dedicated `typesafe` evaluator (section 5).
 
 ### One Request Path, Layered Hardening
 

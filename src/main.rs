@@ -19,6 +19,7 @@ pub mod reporter;
 pub mod rules;
 pub mod runner;
 pub mod transcript;
+pub mod typesafe;
 
 /// Result of running one manifest: pass/fail, epochs used, and the per-evaluator
 /// outcomes needed for a baseline diff.
@@ -45,11 +46,122 @@ struct ManifestRun {
     budget_halt: Option<String>,
 }
 
+/// The TypeSafe credentials one evaluator's TypeSafe traffic would need —
+/// `(api_key_env, base_url)` — resolved through the same inheritance the
+/// runtime uses (per-grader override → evaluator → documented default).
+///
+/// Empty when the evaluator declares no TypeSafe traffic at all, which is
+/// also how a `typesafe` evaluator with no `questions` reads: there is
+/// nothing to call, so there is no credential to be missing, and the runtime
+/// must keep reporting the far more useful "declares no `questions`" error.
+fn typesafe_credentials(eval: &manifest::Evaluator) -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> = Vec::new();
+    if eval.r#type == manifest::EvaluatorType::Typesafe
+        && let Some(spec) = eval.typesafe_spec()
+    {
+        keys.push((spec.api_key_env, spec.base_url));
+    }
+    for grader in &eval.graders {
+        if grader.typesafe.is_some()
+            && let Some(spec) = grader.typesafe_spec(eval)
+        {
+            let key = (spec.api_key_env, spec.base_url);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+/// Apply the load-time `fallback: "llm"` decision (design §Integration
+/// points).
+///
+/// When an evaluator declares `fallback: "llm"` and a credential its
+/// TypeSafe calls need cannot be resolved, that evaluator — and every
+/// TypeSafe grader inside it — resolves to the equivalent `llm` grader for
+/// the **whole** run. Decided once, here, before any epoch: switching
+/// graders mid-run on a runtime 401 would make two epochs' κ numbers
+/// describe two different graders.
+///
+/// The conversion keeps exactly what the converted grader still uses — the
+/// prompt (synthesized from the questions when the manifest has none of its
+/// own) and the `document` state — and drops what it no longer consults, so
+/// the run fingerprints as the `llm` grader it now is rather than as the Jev
+/// configuration it is not running (design acceptance test 4).
+///
+/// Returns the `(evaluator, missing env var)` pairs it converted, after
+/// printing the warning each one owes the operator.
+fn apply_typesafe_fallback(manifest: &mut manifest::PlasticityManifest) -> Vec<(String, String)> {
+    let mut converted: Vec<(String, String)> = Vec::new();
+    for index in 0..manifest.evaluators.len() {
+        // Resolve first (shared borrow), convert second (unique borrow): the
+        // decision needs the inherited connection settings, and only the
+        // intact evaluator can answer what they are.
+        let needed = {
+            let eval = &manifest.evaluators[index];
+            if eval.fallback.as_deref() != Some("llm") {
+                continue;
+            }
+            typesafe_credentials(eval)
+        };
+        if needed.is_empty() {
+            continue;
+        }
+        // `Err` covers both "unset/empty" and a rejected credential name;
+        // `Ok(None)` is a loopback endpoint, which needs no credential and so
+        // must NOT trigger a fallback.
+        let Some(missing_env) = needed
+            .iter()
+            .find(|(env, url)| crate::llm_client::resolve_api_key(env, url).is_err())
+            .map(|(env, _)| env.clone())
+        else {
+            continue;
+        };
+
+        let eval = &mut manifest.evaluators[index];
+        if eval.r#type == manifest::EvaluatorType::Typesafe {
+            let prompt = eval.prompt.clone().filter(|p| !p.is_empty());
+            eval.prompt =
+                prompt.or_else(|| eval.questions.as_ref().map(typesafe::synthesize_llm_prompt));
+            eval.r#type = manifest::EvaluatorType::Llm;
+            eval.questions = None;
+            eval.mapping = None;
+            eval.indeterminate_below = None;
+            eval.base_url = None;
+            eval.model = None;
+            eval.api_key_env = None;
+        }
+        // One decision for the whole evaluator: a quorum mixing Jev and chat
+        // graders would break the κ comparability the quorum exists for.
+        for grader in &mut eval.graders {
+            grader.typesafe = None;
+        }
+        // Consumed: this run's fallback is decided, and leaving the switch
+        // set would keep the converted evaluator from ever looking like the
+        // `llm` grader it resolved to.
+        eval.fallback = None;
+        converted.push((eval.name.clone(), missing_env));
+    }
+    for (name, env) in &converted {
+        println!(
+            "⚠️ {} not set — evaluator '{}' is falling back to the llm grader for this run.",
+            env, name
+        );
+    }
+    converted
+}
+
 async fn run_single_manifest(manifest_path: &Path) -> Result<ManifestRun> {
     let manifest_content = fs::read_to_string(manifest_path)
         .with_context(|| format!("Failed to read {:?}", manifest_path))?;
-    let manifest: manifest::PlasticityManifest = serde_json::from_str(&manifest_content)
+    let mut manifest: manifest::PlasticityManifest = serde_json::from_str(&manifest_content)
         .with_context(|| format!("Failed to parse {:?}", manifest_path))?;
+
+    // Decided before any epoch runs — and before `manifest.evaluators` is
+    // hashed into the patch provenance below, so the artifact records the
+    // grader that actually graded.
+    apply_typesafe_fallback(&mut manifest);
 
     let run_id = Uuid::new_v4().to_string();
     println!("Starting Run ID: {}", run_id);
@@ -722,7 +834,9 @@ async fn main() -> Result<()> {
     // plasticity.json, and STARTED A REAL RUN. Asking for help must never
     // execute anything.
     if raw_args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: NeuroPlasticity [test <manifest.json>] [--print-egress-plan] | verify-patch ...");
+        println!(
+            "Usage: NeuroPlasticity [test <manifest.json>] [--print-egress-plan] | verify-patch ..."
+        );
         println!("  (no args)      runs ./plasticity.json");
         println!("  test <path>    runs the manifest at <path>");
         println!("  --help, -h     this message");
@@ -775,16 +889,35 @@ async fn main() -> Result<()> {
                 egress: d.egress.clone(),
             })
             .unwrap_or_default();
-        let has_llm_evaluators = m
-            .evaluators
-            .iter()
-            .any(|e| e.r#type == manifest::EvaluatorType::Llm);
+        // A TypeSafe evaluator is a grader too: it must appear in the plan,
+        // and its own endpoint lines below are the outbound path the design
+        // requires the plan to show.
+        //
+        // Deliberately NOT run through `apply_typesafe_fallback`: this flag
+        // inspects the manifest without executing anything, and keying its
+        // output on an ambient environment variable would make a static
+        // diagnostic disagree with the file on disk.
+        let mut has_llm_evaluators = false;
+        let mut typesafe_endpoints: Vec<String> = Vec::new();
+        for e in &m.evaluators {
+            if e.r#type == manifest::EvaluatorType::Llm
+                || e.r#type == manifest::EvaluatorType::Typesafe
+            {
+                has_llm_evaluators = true;
+            }
+            for url in e.typesafe_endpoints() {
+                if !typesafe_endpoints.contains(&url) {
+                    typesafe_endpoints.push(url);
+                }
+            }
+        }
         print!(
             "{}",
             egress::render_egress_plan(
                 &handling,
                 &m.optimization.meta_llm.provider,
-                has_llm_evaluators
+                has_llm_evaluators,
+                &typesafe_endpoints
             )
         );
         return Ok(());
@@ -1094,5 +1227,218 @@ mod provenance_header_tests {
     fn absent_field_returns_none() {
         assert!(extract_digest(PATCH, "Transcript digest").is_none());
         assert!(extract_digest("no provenance here", "Manifest hash").is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The load-time `fallback: "llm"` decision (design §Integration points)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod typesafe_fallback_tests {
+    use super::*;
+
+    /// The env var every one of these tests points TypeSafe at. It is never
+    /// set (and is removed under the lock, because another test may have set
+    /// it), so "the credential cannot be resolved" is deterministic rather
+    /// than dependent on the machine running the suite.
+    const KEY_ENV: &str = "NEUROPLASTICITY_TEST_MISSING_API_KEY";
+
+    const QUESTION: &str = r#"{"primitive":"noul","question":"Does the transcript comply?","criteria":"Only what is shown."}"#;
+
+    fn parse(evaluator: &str) -> manifest::PlasticityManifest {
+        let json = format!(
+            r#"{{
+              "name": "fallback",
+              "task_prompt": "x",
+              "agent_command": ["true"],
+              "sandbox": {{ "engine": "docker", "base_image": "alpine" }},
+              "optimization": {{
+                "target_rules_file": "rules.json",
+                "epochs": 1,
+                "pass_threshold": 1.0,
+                "meta_llm": {{ "model": "unused" }}
+              }},
+              "evaluators": [ {} ]
+            }}"#,
+            evaluator
+        );
+        serde_json::from_str(&json).expect("test manifest should parse")
+    }
+
+    fn typesafe_evaluator() -> String {
+        format!(
+            r#"{{
+              "name": "jev",
+              "type": "typesafe",
+              "weight": 1.0,
+              "document": "{{{{run.transcript}}}}",
+              "questions": {{ "passes_rule": {} }},
+              "mapping": {{ "pass_above": 0.9 }},
+              "indeterminate_below": 0.6,
+              "base_url": "https://api.typesafe.ai",
+              "model": "jev-1.13.0",
+              "api_key_env": "{}",
+              "fallback": "llm"
+            }}"#,
+            QUESTION, KEY_ENV
+        )
+    }
+
+    /// The credential check reads the environment, so — like every other test
+    /// that touches env vars here — it holds the crate-wide lock.
+    async fn without_key() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = crate::typesafe::env_lock().lock().await;
+        unsafe {
+            // SAFETY: held under env_lock().
+            std::env::remove_var(KEY_ENV);
+        }
+        guard
+    }
+
+    #[tokio::test]
+    async fn a_missing_key_resolves_the_evaluator_to_the_llm_grader() {
+        let _guard = without_key().await;
+        let mut m = parse(&typesafe_evaluator());
+
+        let converted = apply_typesafe_fallback(&mut m);
+        assert_eq!(
+            converted,
+            vec![("jev".to_string(), KEY_ENV.to_string())],
+            "the operator is owed one warning, naming the variable to set"
+        );
+
+        let eval = &m.evaluators[0];
+        assert_eq!(eval.r#type, manifest::EvaluatorType::Llm);
+        let prompt = eval
+            .prompt
+            .as_deref()
+            .expect("an llm grader needs a prompt");
+        // The questions survive as prompt text: rewording one must still
+        // change the run, exactly as it did as a question.
+        assert!(prompt.contains("Does the transcript comply?"), "{}", prompt);
+        assert!(prompt.contains("Only what is shown."), "{}", prompt);
+        assert_eq!(
+            eval.document.as_deref(),
+            Some("{{run.transcript}}"),
+            "the state the grader judges must survive the conversion"
+        );
+        // What the converted grader no longer consults leaves the serialized
+        // form, so the run fingerprints as the llm grader it now is.
+        assert!(eval.questions.is_none());
+        assert!(eval.mapping.is_none());
+        assert!(eval.indeterminate_below.is_none());
+        assert!(eval.base_url.is_none());
+        assert!(eval.model.is_none());
+        assert!(eval.api_key_env.is_none());
+        assert!(eval.fallback.is_none(), "the switch is consumed");
+    }
+
+    #[tokio::test]
+    async fn a_resolved_key_leaves_the_evaluator_running_typesafe() {
+        let _guard = crate::typesafe::env_lock().lock().await;
+        unsafe {
+            // SAFETY: held under env_lock().
+            std::env::set_var(KEY_ENV, "sk-not-a-real-key");
+        }
+        let mut m = parse(&typesafe_evaluator());
+
+        let converted = apply_typesafe_fallback(&mut m);
+        assert!(converted.is_empty(), "{:?}", converted);
+        assert_eq!(m.evaluators[0].r#type, manifest::EvaluatorType::Typesafe);
+        assert!(m.evaluators[0].questions.is_some());
+        assert_eq!(
+            m.evaluators[0].fallback.as_deref(),
+            Some("llm"),
+            "nothing is decided until the credential is actually missing"
+        );
+
+        unsafe {
+            // SAFETY: held under env_lock(); restored so later tests see the
+            // environment this suite started with.
+            std::env::remove_var(KEY_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quorum_is_converted_as_a_whole_not_grader_by_grader() {
+        let _guard = without_key().await;
+        let quorum = format!(
+            r#"{{
+              "name": "jev-quorum",
+              "type": "typesafe",
+              "weight": 1.0,
+              "document": "state",
+              "questions": {{ "passes_rule": {} }},
+              "api_key_env": "{}",
+              "fallback": "llm",
+              "graders": [
+                {{ "name": "jev-primary", "role": "primary", "typesafe": {{ "questions": {{ "a": {} }} }} }},
+                {{ "name": "jev-audit", "role": "audit", "typesafe": {{ "questions": {{ "b": {} }} }} }},
+                {{ "name": "chat-veto", "role": "veto" }}
+              ]
+            }}"#,
+            QUESTION, KEY_ENV, QUESTION, QUESTION
+        );
+        let mut m = parse(&quorum);
+
+        let converted = apply_typesafe_fallback(&mut m);
+        assert_eq!(converted.len(), 1);
+
+        let eval = &m.evaluators[0];
+        assert_eq!(eval.r#type, manifest::EvaluatorType::Llm);
+        // Every TypeSafe grader goes together: a quorum that mixed Jev and
+        // chat verdicts would make κ across epochs describe two graders.
+        assert!(eval.graders.iter().all(|g| g.typesafe.is_none()));
+        assert_eq!(eval.graders.len(), 3, "no grader is dropped");
+        assert_eq!(eval.graders[2].name, "chat-veto");
+    }
+
+    #[tokio::test]
+    async fn an_evaluator_that_declares_no_questions_is_left_for_the_runtime_to_diagnose() {
+        let _guard = without_key().await;
+        let json = format!(
+            r#"{{
+              "name": "jev",
+              "type": "typesafe",
+              "weight": 1.0,
+              "document": "state",
+              "api_key_env": "{}",
+              "fallback": "llm"
+            }}"#,
+            KEY_ENV
+        );
+        let mut m = parse(&json);
+
+        // No questions means no TypeSafe call to authenticate, so there is no
+        // credential to be missing: converting here would trade the precise
+        // "declares no `questions`" error for a generic llm one.
+        assert!(apply_typesafe_fallback(&mut m).is_empty());
+        assert_eq!(m.evaluators[0].r#type, manifest::EvaluatorType::Typesafe);
+    }
+
+    #[tokio::test]
+    async fn an_evaluator_without_the_switch_is_never_touched() {
+        let _guard = without_key().await;
+        let json = format!(
+            r#"{{
+              "name": "jev",
+              "type": "typesafe",
+              "weight": 1.0,
+              "document": "state",
+              "questions": {{ "passes_rule": {} }},
+              "api_key_env": "{}"
+            }}"#,
+            QUESTION, KEY_ENV
+        );
+        let mut m = parse(&json);
+
+        assert!(apply_typesafe_fallback(&mut m).is_empty());
+        assert_eq!(m.evaluators[0].r#type, manifest::EvaluatorType::Typesafe);
+        assert!(m.evaluators[0].questions.is_some());
+        // No fallback declared → the missing key stays an infrastructure
+        // failure that aborts the run, which is the loud behavior the design
+        // wants when nobody asked for a fallback.
+        assert!(m.evaluators[0].fallback.is_none());
     }
 }
